@@ -1,0 +1,20 @@
+services:
+  redis:
+    image: redis:7.4-alpine
+    container_name: hnexam-redis
+    restart: unless-stopped
+    command: ["sh", "-c", "exec redis-server --appendonly yes --appendfsync everysec --requirepass \"$$REDIS_PASSWORD\""]
+    environment:
+      REDIS_PASSWORD: ${HNEXAM_REDIS_PASSWORD:?请在服务器环境文件中设置Redis密码}
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - hnexam-redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep PONG"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  hnexam-redis-data:

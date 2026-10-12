@@ -1,0 +1,13 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="后端 Backend" type="SpringBootApplicationConfigurationType" factoryName="Spring Boot">
+    <module name="hn-exam" />
+    <option name="SPRING_BOOT_MAIN_CLASS" value="com.huaneng.shanyin.hnexam.HnExamApplication" />
+    <option name="ALTERNATIVE_JRE_PATH" value="E:\web\jdk17\jdk-17.0.20.1+1" />
+    <option name="ALTERNATIVE_JRE_PATH_ENABLED" value="true" />
+    <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$/backend" />
+    <option name="VM_PARAMETERS" value="-Dh2.bindAddress=127.0.0.1" />
+    <method v="2">
+      <option name="Make" enabled="true" />
+    </method>
+  </configuration>
+</component>

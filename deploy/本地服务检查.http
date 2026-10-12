@@ -1,0 +1,6 @@
+### 后端及Redis健康状态
+GET http://127.0.0.1:8080/api/health
+Accept: application/json
+
+### 前端开发服务
+GET http://127.0.0.1:5173/

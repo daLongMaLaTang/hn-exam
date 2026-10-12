@@ -1,0 +1,22 @@
+spring:
+  datasource:
+    url: ${HNEXAM_DB_URL:jdbc:mysql://127.0.0.1:3306/hn_exam?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai}
+    username: ${HNEXAM_DB_USER:hn_exam}
+    password: ${HNEXAM_DB_PASSWORD:}
+    hikari:
+      maximum-pool-size: ${HNEXAM_DB_POOL_MAX:30}
+      minimum-idle: ${HNEXAM_DB_POOL_MIN:5}
+      connection-timeout: ${HNEXAM_DB_CONNECTION_TIMEOUT_MS:10000}
+      validation-timeout: 1000
+      max-lifetime: 1800000
+  jpa:
+    hibernate:
+      ddl-auto: update
+  h2:
+    console:
+      enabled: false
+
+app:
+  redis:
+    enabled: ${HNEXAM_REDIS_ENABLED:true}
+
