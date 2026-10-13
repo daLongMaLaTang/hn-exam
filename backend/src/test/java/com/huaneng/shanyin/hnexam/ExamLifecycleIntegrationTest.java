@@ -651,9 +651,18 @@ class ExamLifecycleIntegrationTest {
         }
         var file=new org.springframework.mock.web.MockMultipartFile("file","档案.xlsx","application/octet-stream",bytes);
         var result=profileExcel.importWorkbook(file);assertThat(result.created()).isEqualTo(1);assertThat(result.updated()).isEqualTo(1);assertThat(result.failed()).isEqualTo(2);
+        assertThat(result.credentials()).singleElement().satisfies(receipt->{
+            assertThat(receipt.employeeNo()).isEqualTo(fresh);
+            assertThat(receipt.initialPassword()).hasSize(25).isNotEqualTo("Candidate@12345");
+            assertThat(new org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder().matches(receipt.initialPassword(),users.findByEmployeeNo(fresh).orElseThrow().getPasswordHash())).isTrue();
+            assertThat(receipt.toString()).doesNotContain(receipt.initialPassword());
+        });
+        String originalHash=users.findByEmployeeNo(fresh).orElseThrow().getPasswordHash();
         var saved=users.findById(existing.getId()).orElseThrow();assertThat(saved.getName()).isEqualTo("更新姓名");assertThat(saved.getDepartment()).isEqualTo("保留部门");assertThat(saved.getPasswordHash()).isEqualTo(existing.getPasswordHash());
         assertThat(saved.getRoles()).extracting(Role::getCode).containsExactly("CANDIDATE");assertThat(users.findByEmployeeNo("bad-date")).isEmpty();
-        assertThat(profileExcel.importWorkbook(file).created()).isZero();
+        var repeated=profileExcel.importWorkbook(file);
+        assertThat(repeated.created()).isZero();assertThat(repeated.credentials()).isEmpty();
+        assertThat(users.findByEmployeeNo(fresh).orElseThrow().getPasswordHash()).isEqualTo(originalHash);
     }
 
     @Test void makeupAudienceRefreshesAndExcludesPendingPassedAbsentAndDisabledPeople() {

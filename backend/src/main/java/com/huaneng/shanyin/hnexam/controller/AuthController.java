@@ -32,7 +32,7 @@ public class AuthController {
     @Transactional
     public LoginResponse password(@org.springframework.security.core.annotation.AuthenticationPrincipal Jwt jwt,
                                    @Valid @RequestBody PasswordRequest request) {
-        var user = users.findByEmployeeNo(jwt.getSubject()).orElseThrow();
+        var user = users.findLockedByEmployeeNo(jwt.getSubject()).orElseThrow();
         if (!encoder.matches(request.oldPassword(), user.getPasswordHash())) throw new IllegalArgumentException("原密码不正确");
         if (request.newPassword() == null || !request.newPassword().matches("(?s)(?=.*[A-Za-z])(?=.*[0-9]).{10,64}")) throw new IllegalArgumentException("新密码须为10至64位，包含字母和数字");
         if (encoder.matches(request.newPassword(), user.getPasswordHash())) throw new IllegalArgumentException("新密码不能与原密码相同");

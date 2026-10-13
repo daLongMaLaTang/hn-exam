@@ -14,6 +14,9 @@ import jakarta.persistence.LockModeType;
 public interface UserRepository extends JpaRepository<AppUser, Long> {
     Optional<AppUser> findByEmployeeNo(String employeeNo);
     @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select u from AppUser u where u.id = :id")
+    Optional<AppUser> findLockedById(Long id);
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select u from AppUser u where u.employeeNo = :employeeNo")
     Optional<AppUser> findLockedByEmployeeNo(String employeeNo);
     boolean existsByEmployeeNo(String employeeNo);

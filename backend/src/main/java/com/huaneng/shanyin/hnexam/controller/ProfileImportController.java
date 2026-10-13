@@ -10,7 +10,7 @@ import org.springframework.security.access.prepost.PreAuthorize;
 public class ProfileImportController {
     private final ProfileExcelService excel;
     @PostMapping(value="/import-excel",consumes=MediaType.MULTIPART_FORM_DATA_VALUE)
-    public ProfileExcelService.Result upload(@RequestPart("file") MultipartFile file){return excel.importWorkbook(file);}
+    public ResponseEntity<ProfileExcelService.Result> upload(@RequestPart("file") MultipartFile file){return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(excel.importWorkbook(file));}
     @GetMapping("/excel-template")
     public ResponseEntity<byte[]> template(){return ResponseEntity.ok().header(HttpHeaders.CONTENT_DISPOSITION,"attachment; filename=profiles.xlsx").contentType(MediaType.parseMediaType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")).body(excel.template());}
 }

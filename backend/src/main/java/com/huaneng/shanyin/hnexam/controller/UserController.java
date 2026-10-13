@@ -12,6 +12,8 @@ import jakarta.validation.constraints.Size;
 import com.huaneng.shanyin.hnexam.repository.RoleRepository;
 import com.huaneng.shanyin.hnexam.repository.UserRepository;
 import com.huaneng.shanyin.hnexam.service.AuthStateService;
+import com.huaneng.shanyin.hnexam.service.InitialCredentials;
+import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotEmpty;
 import lombok.RequiredArgsConstructor;
@@ -30,12 +32,18 @@ public class UserController {
     private final RoleRepository roleRepository;
     private final PasswordEncoder encoder;
     private final AuthStateService authStates;
+    private final InitialCredentials credentials;
+    public record CreatedUser(UserSummary user, InitialCredentials.Receipt credential, String credentialFile) {
+        @Override public String toString() { return "CreatedUser[REDACTED]"; }
+    }
+    public record ResetResult(InitialCredentials.Receipt credential, String credentialFile) {
+        @Override public String toString(){return "ResetResult[REDACTED]";}
+    }
     public record RoleOption(String code, String name, String permissionGroup) {}
     public record RoleUpdate(@NotEmpty Set<String> roles) {}
     public record UserRequest(@NotBlank @Size(max=32) String employeeNo, @NotBlank @Size(max=80) String name,
                               @Size(max=32) String phone, @Size(max=100) String department, @Size(max=100) String team,
                               UserStatus status) {}
-    public record ResetRequest(@NotBlank @Size(min=10,max=64) String password) {}
     public record RoleRequest(@NotBlank String code, @NotBlank @Size(max=100) String name, @NotBlank String permissionGroup) {}
     @GetMapping public List<UserSummary> list() { return userRepository.findAll().stream().map(UserSummary::from).toList(); }
     @GetMapping("/roles") public List<RoleOption> roles() {
@@ -53,14 +61,18 @@ public class UserController {
         return UserSummary.from(user);
     }
 
-    @PostMapping @PreAuthorize("hasAnyAuthority('SYSTEM_ADMIN','TRAINING_ADMIN')")
-    public UserSummary create(@Valid @RequestBody UserRequest request) {
+    @PostMapping @PreAuthorize("hasAnyAuthority('SYSTEM_ADMIN','TRAINING_ADMIN')") @Transactional
+    public CreatedUser create(@Valid @RequestBody UserRequest request, HttpServletResponse response) {
         if (request.employeeNo().trim().equalsIgnoreCase("admin")) throw new IllegalArgumentException("admin 为保留账号");
         if (userRepository.existsByEmployeeNo(request.employeeNo().trim())) throw new IllegalArgumentException("工号已存在");
         AppUser user = new AppUser(); apply(user, request);
-        user.setPasswordHash(encoder.encode("Candidate@12345")); user.setMustChangePassword(true);
+        String password=credentials.generate();
+        user.setPasswordHash(encoder.encode(password)); user.setMustChangePassword(true);
         user.getRoles().add(roleRepository.findByCode("CANDIDATE").orElseThrow());
-        return UserSummary.from(userRepository.save(user));
+        userRepository.saveAndFlush(user);
+        response.setHeader("Cache-Control","no-store");
+        var receipt=new InitialCredentials.Receipt(user.getId(),user.getEmployeeNo(),user.getName(),password);
+        return new CreatedUser(UserSummary.from(user),receipt,credentials.workbook(List.of(receipt)));
     }
 
     @PutMapping("/{id}") @PreAuthorize("hasAnyAuthority('SYSTEM_ADMIN','TRAINING_ADMIN')") @Transactional
@@ -85,14 +97,19 @@ public class UserController {
     }
 
     @PostMapping("/{id}/reset-password") @PreAuthorize("hasAuthority('SYSTEM_ADMIN')") @Transactional
-    public java.util.Map<String,String> reset(@PathVariable Long id, @Valid @RequestBody ResetRequest request, @AuthenticationPrincipal Jwt jwt) {
-        if (!request.password().matches("(?s)(?=.*[A-Za-z])(?=.*[0-9]).{10,64}")) throw new IllegalArgumentException("密码须为10至64位，包含字母和数字");
-        var user = userRepository.findById(id).orElseThrow(() -> new IllegalArgumentException("人员不存在"));
+    public ResetResult reset(@PathVariable Long id, @RequestBody(required=false) java.util.Map<String,Object> request,
+                                           @AuthenticationPrincipal Jwt jwt, HttpServletResponse response) {
+        var user = userRepository.findLockedById(id).orElseThrow(() -> new IllegalArgumentException("人员不存在"));
         if (user.getEmployeeNo().equals("admin") && !jwt.getSubject().equals("admin"))
             throw new org.springframework.security.access.AccessDeniedException("只有 admin 可以重置该账号密码");
-        user.setPasswordHash(encoder.encode(request.password())); user.setMustChangePassword(true); user.setAuthVersion(user.getAuthVersion()+1);
+        if (user.getEmployeeNo().equals(jwt.getSubject())) throw new IllegalArgumentException("修改自己的密码请使用账号设置，避免重置后丢失登录状态");
+        if (request!=null && !request.isEmpty()) throw new IllegalArgumentException("临时密码由系统自动生成，无需提交密码");
+        String password=credentials.generate();
+        user.setPasswordHash(encoder.encode(password)); user.setMustChangePassword(true); user.setAuthVersion(user.getAuthVersion()+1);
         authStates.evictAfterCommit(user.getEmployeeNo());
-        return java.util.Map.of("message", "密码已重置，该用户下次登录须修改密码");
+        response.setHeader("Cache-Control","no-store");
+        var receipt=new InitialCredentials.Receipt(user.getId(),user.getEmployeeNo(),user.getName(),password);
+        return new ResetResult(receipt,credentials.workbook(List.of(receipt)));
     }
 
     @PostMapping("/roles") @PreAuthorize("hasAuthority('SYSTEM_ADMIN') and authentication.name == 'admin'")

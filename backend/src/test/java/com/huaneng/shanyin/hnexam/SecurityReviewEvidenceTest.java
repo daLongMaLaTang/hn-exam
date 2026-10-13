@@ -26,7 +26,7 @@ import static org.mockito.Mockito.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
-/** Regression tests plus the remaining shared-initial-password evidence; no remote AI is used. */
+/** Security regression tests; no remote AI is used. */
 @SpringBootTest(properties={"spring.config.import=", "spring.datasource.url=jdbc:h2:mem:security_evidence;DB_CLOSE_DELAY=-1", "spring.jpa.hibernate.ddl-auto=create-drop", "app.redis.enabled=false", "app.bootstrap.question-bank-path=", "app.ai.api-key=", "app.jwt.secret=", "app.jwt.require-configured=false"})
 @AutoConfigureMockMvc
 class SecurityReviewEvidenceTest {
@@ -41,18 +41,48 @@ class SecurityReviewEvidenceTest {
     }
     String bearer(AppUser u){return "Bearer "+auth.tokenFor(u).accessToken();}
     Question question(QuestionType type) {var q=new Question();q.setType(type);q.setStatus(QuestionStatus.ACTIVE);q.setCourseCode("AUDIT_ONLY");q.setStem("隔离题干");q.setAnswer(type==QuestionType.FILL_BLANK?"验电":"A");q.setOptionsJson("[\"A\",\"B\"]");return questions.save(q);}
-    @Test void evidenceSharedInitialPasswordCanClaimTwoNewAccounts() throws Exception {
+    @Test void newAccountsRejectSharedPasswordAndIssueDistinctInitialCredentials() throws Exception {
         var admin=user("SYSTEM_ADMIN");
+        Set<String> issued=new HashSet<>();
         for(int i=0;i<2;i++) {
             String number="new-"+UUID.randomUUID().toString().substring(0,16);
-            mvc.perform(post("/api/users").header("Authorization",bearer(admin)).contentType("application/json")
-                .content(json.writeValueAsString(Map.of("employeeNo",number,"name","隔离新学员")))).andExpect(status().isOk());
-            var login=auth.login(new LoginRequest(number,"Candidate@12345"),"127.0.0.1");
+            var response=mvc.perform(post("/api/users").header("Authorization",bearer(admin)).contentType("application/json")
+                .content(json.writeValueAsString(Map.of("employeeNo",number,"name","隔离新学员")))).andExpect(status().isOk())
+                .andExpect(header().string("Cache-Control","no-store")).andReturn().getResponse();
+            String password=json.readTree(response.getContentAsString()).path("credential").path("initialPassword").asText();
+            assertThat(password).hasSize(25);assertThat(issued.add(password)).isTrue();
+            assertThatThrownBy(()->auth.login(new LoginRequest(number,"Candidate@12345"),"127.0.0.1"))
+                .isInstanceOf(org.springframework.security.authentication.BadCredentialsException.class);
+            var login=auth.login(new LoginRequest(number,password),"127.0.0.1");
             assertThat(login.mustChangePassword()).isTrue();
+            mvc.perform(get("/api/practice/questions").header("Authorization","Bearer "+login.accessToken())).andExpect(status().isForbidden());
             mvc.perform(post("/api/auth/password").header("Authorization","Bearer "+login.accessToken()).contentType("application/json")
-                .content(json.writeValueAsString(Map.of("oldPassword","Candidate@12345","newPassword","ClaimedOnly-20261011"))))
+                .content(json.writeValueAsString(Map.of("oldPassword",password,"newPassword","PersonalOnly-20261013"))))
                 .andExpect(status().isOk()).andExpect(jsonPath("mustChangePassword").value(false));
+            mvc.perform(get("/api/users").header("Authorization",bearer(admin))).andExpect(status().isOk())
+                .andExpect(content().string(org.hamcrest.Matchers.not(org.hamcrest.Matchers.containsString(password))));
         }
+    }
+
+    @Test void generatedResetInvalidatesOldTokensAndCredentialsAndRequiresSystemAdmin() throws Exception {
+        var admin=user("SYSTEM_ADMIN");var candidate=user("CANDIDATE");var trainer=user("TRAINING_ADMIN");
+        String oldToken=bearer(candidate);String oldHash=candidate.getPasswordHash();
+        mvc.perform(post("/api/users/"+candidate.getId()+"/reset-password").header("Authorization",bearer(trainer))).andExpect(status().isForbidden());
+        assertThat(users.findById(candidate.getId()).orElseThrow().getPasswordHash()).isEqualTo(oldHash);
+        var response=mvc.perform(post("/api/users/"+candidate.getId()+"/reset-password").header("Authorization",bearer(admin)))
+            .andExpect(status().isOk()).andExpect(header().string("Cache-Control","no-store")).andReturn().getResponse();
+        String password=json.readTree(response.getContentAsString()).path("credential").path("initialPassword").asText();
+        assertThat(auth.login(new LoginRequest(candidate.getEmployeeNo(),password),"127.0.0.1").mustChangePassword()).isTrue();
+        mvc.perform(get("/api/auth/me").header("Authorization",oldToken)).andExpect(status().isUnauthorized());
+        mvc.perform(post("/api/users/"+admin.getId()+"/reset-password").header("Authorization",bearer(admin))).andExpect(status().isBadRequest());
+    }
+
+    @Test void learnersAndReadOnlyLeadersCannotCreateOrReceiveCredentials() throws Exception {
+        for(String role:List.of("CANDIDATE","DEPARTMENT_LEADER")) {
+            mvc.perform(post("/api/users").header("Authorization",bearer(user(role))).contentType("application/json")
+                .content("{\"employeeNo\":\"forbidden-new\",\"name\":\"禁止创建\"}")).andExpect(status().isForbidden());
+        }
+        assertThat(users.existsByEmployeeNo("forbidden-new")).isFalse();
     }
     @Test void knownDefaultSigningKeyCannotForgeIdentity() throws Exception {
         var target=user("SYSTEM_ADMIN");

@@ -34,6 +34,8 @@ public class BootstrapData implements ApplicationRunner {
 
     @Value("${app.bootstrap.candidate-password}")
     private String candidatePassword;
+    @Value("${app.bootstrap.import-legacy-candidates:false}")
+    private boolean importLegacyCandidates;
 
     @Override
     @Transactional
@@ -67,6 +69,9 @@ public class BootstrapData implements ApplicationRunner {
     }
 
     private void seedCandidates() throws IOException {
+        // New installations use the administrator's Excel flow so credentials can be handed out.
+        // Existing accounts are untouched; the historical CSV path requires explicit opt-in.
+        if (!importLegacyCandidates) return;
         ClassPathResource resource = new ClassPathResource("bootstrap/candidates.csv");
         // Real learner rosters stay local and are not required in a source-only backup.
         if (!resource.exists()) return;
