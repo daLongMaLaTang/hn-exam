@@ -12,6 +12,8 @@ spring:
     username: sa
     password:
     hikari:
+      # Parent-row locks serialize a candidate's writes; avoid cross-candidate gap locks.
+      transaction-isolation: TRANSACTION_READ_COMMITTED
       maximum-pool-size: ${HNEXAM_DB_POOL_MAX:30}
       minimum-idle: ${HNEXAM_DB_POOL_MIN:5}
       connection-timeout: ${HNEXAM_DB_CONNECTION_TIMEOUT_MS:10000}
@@ -65,7 +67,7 @@ app:
     max-failures: 8
     failure-window-seconds: 900
   jwt:
-    secret: ${HNEXAM_JWT_SECRET:hnExam-local-development-secret-change-before-release-2026}
+    secret: ${HNEXAM_JWT_SECRET:}
     ttl-seconds: 28800
   bootstrap:
     admin-password: ${HNEXAM_BOOTSTRAP_PASSWORD:Admin@12345}
@@ -77,3 +79,11 @@ app:
   ai:
     api-key: ${HNEXAM_AI_API_KEY:}
     master-key-file: ${HNEXAM_AI_MASTER_KEY_FILE:../.local/ai-master.key}
+    limits:
+      max-concurrent: ${HNEXAM_AI_MAX_CONCURRENT:8}
+      user-max-concurrent: ${HNEXAM_AI_USER_MAX_CONCURRENT:1}
+      daily-calls: ${HNEXAM_AI_DAILY_CALLS:20000}
+      user-daily-calls: ${HNEXAM_AI_USER_DAILY_CALLS:200}
+      max-input-chars: ${HNEXAM_AI_MAX_INPUT_CHARS:16000}
+      max-output-tokens: ${HNEXAM_AI_MAX_OUTPUT_TOKENS:1024}
+      timeout-seconds: ${HNEXAM_AI_TIMEOUT_SECONDS:60}

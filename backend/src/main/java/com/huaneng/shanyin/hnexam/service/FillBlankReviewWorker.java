@@ -29,7 +29,7 @@ public class FillBlankReviewWorker {
                 for (var q : review.questions()) {
                     if (!"FILL_PENDING".equals(q.aiStatus()) || q.awardedPoints() != null) continue;
                     try {
-                        var result = semantic.grade(id, q.id(), q.stem(), q.correctAnswer(), q.savedAnswer(), q.points());
+                        var result = semantic.grade(id, q.id(), q.stem(), q.correctAnswer(), q.savedAnswer(), q.points(), review.grade().userId());
                         exams.resolveFillBlank(id, q.id(), result, provider.config().getModel());
                     } catch (RuntimeException e) { exams.resolveFillBlank(id, q.id(), null, null); }
                 }

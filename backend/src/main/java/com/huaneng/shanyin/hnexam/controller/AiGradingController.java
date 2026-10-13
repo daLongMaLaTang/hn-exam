@@ -15,12 +15,15 @@ public class AiGradingController {
     private final AiGradingService grading;
     private final AiKeyCipher cipher;
     private final DeepSeekConnection connection;
+    private final AiUsageService usage;
     public record Config(@NotBlank(message="请填写DeepSeek API Key") @Size(max=512, message="API Key长度不能超过512个字符") String apiKey) {
         @Override public String toString() { return "Config[apiKey=REDACTED]"; }
     }
     @GetMapping("/api/ai/status") public Map<String,Object> status() {
         return Map.of("available", provider.available());
     }
+    @PreAuthorize("hasAuthority('SYSTEM_ADMIN') and authentication.name == 'admin'")
+    @GetMapping("/api/ai/usage") public Map<String,Object> usage() { return usage.today(); }
     @PreAuthorize("hasAuthority('SYSTEM_ADMIN') and authentication.name == 'admin'")
     @GetMapping("/api/ai/settings") public Map<String,Object> get() {
         var c=provider.config();

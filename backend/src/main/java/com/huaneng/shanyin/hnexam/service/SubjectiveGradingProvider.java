@@ -10,7 +10,7 @@ import java.util.Optional;
  */
 public interface SubjectiveGradingProvider {
     record Request(Long attemptId, Long questionId, QuestionType type, String stem,
-                   String referenceAnswer, String candidateAnswer, int maximumPoints) {}
+                   String referenceAnswer, String candidateAnswer, int maximumPoints, Long userId) {}
     record Suggestion(int points, double semanticSimilarity, String reason, String provider, String model) {}
 
     boolean available();

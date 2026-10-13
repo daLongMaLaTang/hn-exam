@@ -100,6 +100,10 @@ class ExamHttpLoadTest {
         report.put("maxInFlightHttpRequests", concurrency); report.put("database", Boolean.getBoolean("hnexam.loadtest.mysql") ? "isolated MySQL hn_exam_loadtest_20261011; pool=30; Redis disabled" : "isolated in-memory H2; pool=30; Redis disabled");
         report.put("exclusions", "Real browsers, external AI, public network, full-duration exam; application and load generator share one JVM");
         report.put("passwordLoginIncluded",loginIncluded);
+        try (var connection = java.util.Objects.requireNonNull(jdbc.getDataSource()).getConnection()) {
+            report.put("jdbcTransactionIsolation", connection.getTransactionIsolation());
+            assertThat(connection.getTransactionIsolation()).isEqualTo(java.sql.Connection.TRANSACTION_READ_COMMITTED);
+        }
         long begin = System.nanoTime();
         try {
             if(loginIncluded) {

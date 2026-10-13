@@ -29,12 +29,20 @@ class AiSettingsIntegrationTest {
     @Autowired AiSettingsRepository settings;
     @Autowired AiKeyCipher cipher;
     @Autowired OpenAiCompatibleGradingProvider provider;
+    @Autowired AiUsageService usage;
+    @Autowired com.huaneng.shanyin.hnexam.repository.AiUsageBucketRepository usageBuckets;
+    @Autowired com.huaneng.shanyin.hnexam.repository.AiCallLeaseRepository leases;
+    @Autowired javax.sql.DataSource dataSource;
     @MockitoBean DeepSeekConnection connection;
-    @BeforeEach void resetSettings() { settings.deleteAll(); }
+    @BeforeEach void resetSettings() {
+        settings.deleteAll(); leases.deleteAll(); usageBuckets.deleteAll(); usage.initialize();
+    }
     @AfterAll static void clean() throws Exception { Files.deleteIfExists(keyFile); Files.deleteIfExists(keyFile.getParent()); }
     String body(String key) throws Exception { return json.writeValueAsString(Map.of("apiKey",key)); }
     @Test @WithMockUser(username="admin",authorities="SYSTEM_ADMIN")
     void adminCanConnectReplaceAndDisableWithoutReturningSecrets() throws Exception {
+        mvc.perform(get("/api/ai/usage")).andExpect(status().isOk())
+            .andExpect(jsonPath("limits.maxConcurrent").value(8)).andExpect(jsonPath("remainingCalls").value(20000));
         String key="sk-isolated-first-secret";
         mvc.perform(put("/api/ai/settings").contentType("application/json").content(body(key)))
             .andExpect(status().isOk()).andExpect(jsonPath("available").value(true))
@@ -61,6 +69,29 @@ class AiSettingsIntegrationTest {
         mvc.perform(get("/api/ai/status")).andExpect(status().isOk()).andExpect(jsonPath("keyConfigured").doesNotExist());
         denied(); verifyNoInteractions(connection); assertThat(settings.count()).isZero();
     }
+    @Test void realAdmissionReleasesDatabaseBeforeHttpAndPersistsReportedTokens() throws Exception {
+        var c=new com.huaneng.shanyin.hnexam.entity.AiSettings();c.setEnabled(true);
+        c.setEndpoint(DeepSeekConnection.ENDPOINT);c.setModel(DeepSeekConnection.MODEL);
+        c.setApiKeyCiphertext(cipher.encrypt("isolated-not-a-real-key"));settings.save(c);
+        var client=mock(java.net.http.HttpClient.class);
+        Object original=org.springframework.test.util.ReflectionTestUtils.getField(provider,"http");
+        org.springframework.test.util.ReflectionTestUtils.setField(provider,"http",client);
+        try {
+            @SuppressWarnings("unchecked") java.net.http.HttpResponse<String> response=mock(java.net.http.HttpResponse.class);
+            when(response.statusCode()).thenReturn(200);
+            when(response.body()).thenReturn("{\"usage\":{\"prompt_tokens\":120,\"completion_tokens\":20},\"choices\":[{\"message\":{\"content\":\"{\\\"points\\\":1,\\\"semanticSimilarity\\\":100,\\\"reason\\\":\\\"模拟结果\\\"}\"}}]}");
+            when(client.send(any(java.net.http.HttpRequest.class),org.mockito.ArgumentMatchers.<java.net.http.HttpResponse.BodyHandler<String>>any()))
+                .thenAnswer(call->{
+                    assertThat(org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
+                    assertThat(org.springframework.transaction.support.TransactionSynchronizationManager.hasResource(dataSource)).isFalse();
+                    assertThat(usage.today()).containsEntry("active",1L);
+                    return response;
+                });
+            provider.suggest(new SubjectiveGradingProvider.Request(null,1L,com.huaneng.shanyin.hnexam.domain.QuestionType.FILL_BLANK,"题","答案","作答",1,123L));
+            assertThat(usage.today()).containsEntry("active",0L).containsEntry("admitted",1L)
+                .containsEntry("succeeded",1L).containsEntry("promptTokens",120L).containsEntry("completionTokens",20L);
+        } finally { org.springframework.test.util.ReflectionTestUtils.setField(provider,"http",original); }
+    }
     @Test @WithMockUser(username="admin",authorities="CANDIDATE")
     void NameAloneDoesNotGrantAccess() throws Exception { denied(); mvc.perform(get("/api/ai/status")).andExpect(status().isForbidden()); }
     @Test void anonymousCannotReadOrWrite() throws Exception {
@@ -73,6 +104,7 @@ class AiSettingsIntegrationTest {
         verifyNoInteractions(connection);
     }
     void denied() throws Exception {
+        mvc.perform(get("/api/ai/usage")).andExpect(status().isForbidden());
         mvc.perform(get("/api/ai/settings")).andExpect(status().isForbidden());
         mvc.perform(put("/api/ai/settings").contentType("application/json").content(body("sk-test-secret"))).andExpect(status().isForbidden());
         mvc.perform(post("/api/ai/settings/disable")).andExpect(status().isForbidden());

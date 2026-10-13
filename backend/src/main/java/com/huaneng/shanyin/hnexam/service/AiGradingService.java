@@ -21,7 +21,7 @@ public class AiGradingService {
             var q=review.questions().stream().filter(item->item.id().equals(questionId)&&!item.objective()&&item.type()!=QuestionType.FILL_BLANK).findFirst().orElseThrow(()->new IllegalArgumentException("主观题不存在"));
             tx.executeWithoutResult(s->{ var a=attempts.findLockedById(id).orElseThrow(); if(a.getStatus()!=AttemptStatus.SUBMITTED) throw new IllegalStateException("答卷状态已变更"); a.getAnswers().stream().filter(v->v.getQuestion().getId().equals(questionId)).forEach(v->{v.setAiStatus("RUNNING");v.setAiSuggestedPoints(null);v.setAiSuggestedSimilarity(null);v.setAiSuggestionReason(null);}); });
             try {
-                var suggestion=provider.suggest(new SubjectiveGradingProvider.Request(id,questionId,q.type(),q.stem(),q.correctAnswer(),q.savedAnswer(),q.points())).orElseThrow();
+                var suggestion=provider.suggest(new SubjectiveGradingProvider.Request(id,questionId,q.type(),q.stem(),q.correctAnswer(),q.savedAnswer(),q.points(),review.grade().userId())).orElseThrow();
                 tx.executeWithoutResult(s->{var a=attempts.findLockedById(id).orElseThrow(); a.getAnswers().stream().filter(v->v.getQuestion().getId().equals(questionId)).forEach(v->{
                     if(a.getStatus()!=AttemptStatus.SUBMITTED || a.getExam().getStatus()==ExamStatus.CANCELLED) { v.setAiStatus("DISCARDED"); return; }
                     v.setAiSuggestedPoints(suggestion.points());v.setAiSuggestedSimilarity(suggestion.semanticSimilarity());v.setAiSuggestionReason(suggestion.reason());v.setAiModel(suggestion.model());v.setAiStatus("READY");
@@ -29,6 +29,7 @@ public class AiGradingService {
                 return Map.of("status","READY");
             } catch(Exception e) {
                 tx.executeWithoutResult(s->{var a=attempts.findLockedById(id).orElseThrow(); a.getAnswers().stream().filter(v->v.getQuestion().getId().equals(questionId)).forEach(v->v.setAiStatus("FAILED"));});
+                if (e instanceof AiCallLimitException limit) throw limit;
                 throw new IllegalStateException("AI建议生成失败，该题可重试或人工评分");
             }
         } finally { running.remove(key); }

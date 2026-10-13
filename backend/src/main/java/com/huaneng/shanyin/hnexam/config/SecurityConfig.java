@@ -40,6 +40,8 @@ import java.util.List;
 public class SecurityConfig {
     @Value("${app.web.allowed-origins:http://localhost:5173,http://127.0.0.1:5173}")
     private String allowedOrigins;
+    @Value("${app.jwt.require-configured:false}")
+    private boolean requireConfiguredJwt;
     @Bean
     SecurityFilterChain securityFilterChain(HttpSecurity http, JwtAuthenticationConverter converter, AuthStateService authStates) throws Exception {
         http
@@ -68,6 +70,18 @@ public class SecurityConfig {
 
     @Bean
     SecretKey jwtSecretKey(@Value("${app.jwt.secret}") String secret) {
+        if (secret.isBlank()) {
+            if (requireConfiguredJwt) throw new IllegalStateException("请配置 HNEXAM_JWT_SECRET（至少32字节的独立随机密钥）");
+            // Isolated/local runs without a configured key get a fresh, unguessable key.
+            // Persistent deployments must configure HNEXAM_JWT_SECRET to survive restarts.
+            byte[] generated = new byte[32];
+            new java.security.SecureRandom().nextBytes(generated);
+            org.slf4j.LoggerFactory.getLogger(SecurityConfig.class).warn("未配置 JWT 密钥，当前仅使用临时随机密钥；重启后需要重新登录");
+            return new SecretKeySpec(generated, "HmacSHA256");
+        }
+        if (secret.equals("hnExam-local-development-secret-change-before-release-2026")) {
+            throw new IllegalStateException("禁止使用公开的演示 JWT 密钥，请配置独立随机密钥");
+        }
         if (secret.getBytes(StandardCharsets.UTF_8).length < 32) {
             throw new IllegalStateException("JWT 密钥长度不能少于32字节");
         }

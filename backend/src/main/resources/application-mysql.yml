@@ -17,6 +17,10 @@ spring:
       enabled: false
 
 app:
+  jwt:
+    # MySQL deployments must use a persistent private key; missing values fail startup.
+    require-configured: true
+    secret: ${HNEXAM_JWT_SECRET:}
   redis:
     enabled: ${HNEXAM_REDIS_ENABLED:true}
 

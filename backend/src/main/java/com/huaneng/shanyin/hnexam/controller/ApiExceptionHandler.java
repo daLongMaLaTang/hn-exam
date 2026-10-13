@@ -12,6 +12,11 @@ import com.huaneng.shanyin.hnexam.service.TooManyLoginAttemptsException;
 
 @RestControllerAdvice
 public class ApiExceptionHandler {
+    @ExceptionHandler(com.huaneng.shanyin.hnexam.service.AiCallLimitException.class)
+    @ResponseStatus(HttpStatus.TOO_MANY_REQUESTS)
+    public Map<String, String> aiLimit(com.huaneng.shanyin.hnexam.service.AiCallLimitException exception) {
+        return Map.of("message", exception.getMessage());
+    }
     @ExceptionHandler(org.springframework.security.access.AccessDeniedException.class)
     @ResponseStatus(HttpStatus.FORBIDDEN)
     public Map<String, String> forbidden() { return Map.of("message", "当前账号没有此操作权限"); }
