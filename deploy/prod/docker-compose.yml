@@ -1,0 +1,122 @@
+# 华能山阴培训考试系统 · 单机生产部署
+# 前端静态文件 + 后端 API 同域，Caddy 自动申请 HTTPS 证书
+#
+# 上线：cp .env.example .env && 改好 .env && docker compose up -d --build
+# 日志：docker compose logs -f app
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: hnexam-mysql
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-time-zone=+08:00
+      # 4G 机器必须限制缓冲池，否则 MySQL 会吃掉大半内存
+      - --innodb-buffer-pool-size=256M
+      - --max-connections=200
+    volumes:
+      - ./data/mysql:/var/lib/mysql
+      # 首次启动（数据目录为空）时自动执行这里的 .sql，用于导入历史备份
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+    # 只绑本机，公网扫描器碰不到数据库
+    ports:
+      - "127.0.0.1:3306:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 40s
+
+  redis:
+    image: redis:7-alpine
+    container_name: hnexam-redis
+    restart: always
+    # 考试系统靠 Redis 做 JWT 状态校验和登录防刷，必须开 AOF 持久化
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - ./data/redis:/data
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hnexam-app
+    restart: always
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      TZ: Asia/Shanghai
+      # 必须走 mysql profile：H2 是本地演示用的，线上要用 MySQL
+      SPRING_PROFILES_ACTIVE: mysql
+
+      # 容器内用服务名互联，这段不用改
+      HNEXAM_DB_URL: jdbc:mysql://mysql:3306/${MYSQL_DATABASE}?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
+      HNEXAM_DB_USER: ${MYSQL_USER}
+      HNEXAM_DB_PASSWORD: ${MYSQL_PASSWORD}
+      HNEXAM_DB_POOL_MAX: ${HNEXAM_DB_POOL_MAX:-20}
+      HNEXAM_DB_POOL_MIN: ${HNEXAM_DB_POOL_MIN:-5}
+
+      HNEXAM_REDIS_ENABLED: "true"
+      HNEXAM_REDIS_HOST: redis
+      HNEXAM_REDIS_PORT: "6379"
+      HNEXAM_REDIS_PASSWORD: ${REDIS_PASSWORD}
+
+      # 一旦设定就不要再改，改了已登录用户全部掉线
+      HNEXAM_JWT_SECRET: ${HNEXAM_JWT_SECRET}
+
+      # 线上没有那份 Word 题库文件，留空即跳过自动导入，改由管理员页面导入
+      HNEXAM_QUESTION_BANK_PATH: ""
+      HNEXAM_BOOTSTRAP_PASSWORD: ${HNEXAM_BOOTSTRAP_PASSWORD}
+
+      HNEXAM_AI_API_KEY: ${HNEXAM_AI_API_KEY:-}
+      HNEXAM_AI_MASTER_KEY_FILE: /app/.local/ai-master.key
+
+      # 同域部署其实用不到跨域，这里填对外域名，方便以后前端拆到托管服务
+      APP_WEB_ALLOWEDORIGINS: ${PUBLIC_ORIGIN}
+
+      JAVA_OPTS: ${JAVA_OPTS:--Xms256m -Xmx1024m -XX:+UseSerialGC -Dfile.encoding=UTF-8}
+    volumes:
+      - ./data/app:/app/.local
+      - ./data/logs:/app/logs
+    ports:
+      # 只给本机调试用，对外一律走 Caddy
+      - "127.0.0.1:8080:8080"
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: hnexam-caddy
+    restart: always
+    depends_on:
+      - app
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      SITE_DOMAIN: ${SITE_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # 前端构建产物：build.sh 会把 frontend/dist 复制到这里
+      - ./www:/srv/www:ro
+      - ./data/caddy/data:/data
+      - ./data/caddy/config:/config

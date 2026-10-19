@@ -36,6 +36,8 @@ public class QuestionBankDocxImporter {
 
     @Value("${app.bootstrap.question-bank-path:}")
     private String configuredPath;
+    @Value("${app.bootstrap.repair-short-answers:false}")
+    private boolean repairShortAnswers;
 
     public void importIfNeeded() {
         if (configuredPath == null || configuredPath.isBlank()) return;
@@ -46,6 +48,7 @@ public class QuestionBankDocxImporter {
         }
         try {
             List<Question> parsed = parse(path);
+            if (repairShortAnswers) repairUneditedShortAnswers(path, parsed);
             Set<String> existing = questions.findBySourceStartingWith(SOURCE_PREFIX).stream().map(Question::getSource).collect(java.util.stream.Collectors.toSet());
             List<Question> imported = parsed.stream().filter(q -> !existing.contains(q.getSource())).toList();
             questions.saveAll(imported);
@@ -58,6 +61,74 @@ public class QuestionBankDocxImporter {
     }
 
     List<Question> parse(Path path) throws Exception {
+        List<Question> result = new ArrayList<>(parseLegacy(path).stream().filter(q -> q.getType() != QuestionType.SHORT_ANSWER).toList());
+        var lines = readParagraphs(path);
+        boolean active = false;
+        int number = 0;
+        List<String> block = new ArrayList<>();
+        for (String original : lines) {
+            QuestionType section = heading(original);
+            if (section != null) {
+                if (active) addShortBlock(result, number, block);
+                active = section == QuestionType.SHORT_ANSWER;
+                number = 0; block.clear(); continue;
+            }
+            if (!active) continue;
+            String line = original;
+            // A following question occasionally shares the previous answer's Word paragraph.
+            while (!line.isBlank()) {
+                var start = QUESTION_START.matcher(line);
+                if (start.matches() && Integer.parseInt(start.group(1)) == number + 1) {
+                    addShortBlock(result, number, block); block.clear(); number++;
+                    line = start.group(2).trim();
+                }
+                var inline = Pattern.compile("[。.!！?？]\\s*(" + (number + 1) + "[、．]\\s*[^\\n]+)").matcher(line);
+                if (number > 0 && inline.find()) {
+                    block.add(line.substring(0, inline.start() + 1).trim());
+                    line = inline.group(1).trim();
+                } else {
+                    if (number > 0) block.add(line);
+                    break;
+                }
+            }
+        }
+        if (active) addShortBlock(result, number, block);
+        return result;
+    }
+
+    private void addShortBlock(List<Question> result, int number, List<String> block) {
+        if (number == 0 || block.isEmpty()) return;
+        String full = String.join("\n", block);
+        var marker = Pattern.compile("(?:答案|答)\\s*[：:]").matcher(full);
+        String stem, answer;
+        if (marker.find()) { stem = full.substring(0, marker.start()).trim(); answer = full.substring(marker.end()).trim(); }
+        else { stem = block.get(0).trim(); answer = String.join("\n", block.subList(1, block.size())).trim(); }
+        if (stem.isBlank() || answer.isBlank()) throw new IllegalArgumentException("简答第" + number + "题缺少题干或答案，请核对源文档");
+        var q = new Question(); q.setType(QuestionType.SHORT_ANSWER); q.setStem(stem); q.setAnswer(answer);
+        q.setCourseCode("安全规程"); q.setChapter("未分章"); q.setExplanation(""); q.setDifficulty(3);
+        q.setStatus(QuestionStatus.PENDING_REVIEW); q.setSource(SOURCE_PREFIX + " · 简答题第" + number + "题");
+        result.add(q);
+    }
+
+    private void repairUneditedShortAnswers(Path path, List<Question> parsed) throws Exception {
+        var legacy = parseLegacy(path).stream().filter(q -> q.getType() == QuestionType.SHORT_ANSWER)
+                .collect(java.util.stream.Collectors.toMap(Question::getSource, q -> q, (a,b) -> a));
+        var corrected = parsed.stream().filter(q -> q.getType() == QuestionType.SHORT_ANSWER)
+                .collect(java.util.stream.Collectors.toMap(Question::getSource, q -> q));
+        int repaired = 0, preserved = 0;
+        for (var current : questions.findBySourceStartingWith(SOURCE_PREFIX)) {
+            var old = legacy.get(current.getSource()); var fresh = corrected.get(current.getSource());
+            if (current.isDeleted() || old == null || fresh == null || current.getType() != QuestionType.SHORT_ANSWER) continue;
+            if (current.getStem().equals(fresh.getStem()) && current.getAnswer().equals(fresh.getAnswer())) continue;
+            if (!current.getStem().equals(old.getStem()) || !current.getAnswer().equals(old.getAnswer())) { preserved++; continue; }
+            current.setStem(fresh.getStem()); current.setAnswer(fresh.getAnswer());
+            if (current.getStatus() != QuestionStatus.DISABLED) current.setStatus(QuestionStatus.PENDING_REVIEW);
+            questions.save(current); repaired++;
+        }
+        log.info("简答原文修复：补全 {} 题，保留 {} 题人工修改；历史考试快照未修改", repaired, preserved);
+    }
+
+    List<Question> parseLegacy(Path path) throws Exception {
         List<String> lines = readParagraphs(path);
         List<Question> result = new ArrayList<>();
         QuestionType section = null;

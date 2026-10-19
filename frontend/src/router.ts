@@ -14,6 +14,8 @@ import GradeDetailView from './views/GradeDetailView.vue'
 import AccountView from './views/AccountView.vue'
 import ProfileView from './views/ProfileView.vue'
 import AuditView from './views/AuditView.vue'
+import ExamTrackingView from './views/ExamTrackingView.vue'
+import NotificationsView from './views/NotificationsView.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -24,6 +26,8 @@ const router = createRouter({
     { path: '/users', component: UsersView, meta: {roles:['SYSTEM_ADMIN','TRAINING_ADMIN','DEPARTMENT_LEADER']} },
     { path: '/questions', component: QuestionsView, meta: {roles:['SYSTEM_ADMIN','DEPARTMENT_LEADER','TRAINING_ADMIN','SPECIALIST']} },
     { path: '/exams', component: ExamsView, meta: {roles:['SYSTEM_ADMIN','DEPARTMENT_LEADER','TRAINING_ADMIN','SPECIALIST']} },
+    { path: '/exams/:id/tracking', component: ExamTrackingView, meta: {roles:['SYSTEM_ADMIN','DEPARTMENT_LEADER','TRAINING_ADMIN','SPECIALIST']} },
+    { path: '/notifications', component: NotificationsView, meta: {roles:['CANDIDATE']} },
     { path: '/results', component: ResultsView, meta: {roles:['SYSTEM_ADMIN','DEPARTMENT_LEADER','TRAINING_ADMIN','SPECIALIST']} },
     { path: '/practice', component: PracticeView, meta: {roles:['CANDIDATE']} },
     { path: '/wrong-questions', component: PracticeView, props: {wrong:true}, meta: {roles:['CANDIDATE']} },

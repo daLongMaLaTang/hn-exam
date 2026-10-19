@@ -75,7 +75,7 @@ app:
     candidate-password: ${HNEXAM_CANDIDATE_PASSWORD:Candidate@12345}
     question-bank-path: ${HNEXAM_QUESTION_BANK_PATH:E:/xwechat_files/wxid_rvriaxpboxy022_cc7c/msg/file/2026-09/华能山阴发电有限责任公司安规考试题库.docx}
   web:
-    allowed-origins: "http://localhost:5173,http://127.0.0.1:5173,https://wrap-calendars-armstrong-poor.trycloudflare.com"
+    allowed-origins: "http://localhost:5173,http://127.0.0.1:5173,https://wrap-calendars-armstrong-poor.trycloudflare.com,https://applies-generated-ruled-strengths.trycloudflare.com"
 
   ai:
     api-key: ${HNEXAM_AI_API_KEY:}
@@ -86,5 +86,5 @@ app:
       daily-calls: ${HNEXAM_AI_DAILY_CALLS:20000}
       user-daily-calls: ${HNEXAM_AI_USER_DAILY_CALLS:200}
       max-input-chars: ${HNEXAM_AI_MAX_INPUT_CHARS:16000}
-      max-output-tokens: ${HNEXAM_AI_MAX_OUTPUT_TOKENS:1024}
+      max-output-tokens: ${HNEXAM_AI_MAX_OUTPUT_TOKENS:4096}
       timeout-seconds: ${HNEXAM_AI_TIMEOUT_SECONDS:60}

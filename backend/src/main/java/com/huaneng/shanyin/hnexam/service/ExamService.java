@@ -20,12 +20,14 @@ import java.util.stream.Collectors;
 @Service
 @RequiredArgsConstructor
 public class ExamService {
+    private final com.huaneng.shanyin.hnexam.service.PrivateAdministratorPolicy privateAdmins;
     private final ExamRepository examRepository;
     private final ExamAttemptRepository attemptRepository;
     private final QuestionRepository questionRepository;
     private final UserRepository userRepository;
     private final PersonalExamPaperRepository personalPaperRepository;
     private final AnswerGrader answerGrader;
+    private final FillBlankReviewService blankReview;
     private final WrongQuestionService wrongQuestions;
     @PersistenceContext private EntityManager entityManager;
 
@@ -116,7 +118,7 @@ public class ExamService {
         Exam exam = lockExam(id);
         if (exam.getStatus() != ExamStatus.PUBLISHED) throw new IllegalStateException("只能关闭已发布考试");
         exam.setStatus(ExamStatus.CLOSED);
-        attemptRepository.findByExamIdOrderByStartedAtDesc(id).forEach(a -> {
+        attemptRepository.findByExamIdOrderByStartedAtDesc(id).stream().sorted(Comparator.comparing(ExamAttempt::getId)).forEach(a -> {
             ExamAttempt locked = lockAttempt(a.getId());
             if (locked.getStatus() == AttemptStatus.IN_PROGRESS) grade(locked, Instant.now());
         });
@@ -128,8 +130,8 @@ public class ExamService {
         Exam exam = lockExam(id);
         if (exam.getStatus() != ExamStatus.PUBLISHED) throw new IllegalStateException("只能取消已发布考试");
         if (reason == null || reason.isBlank() || reason.length() > 500) throw new IllegalArgumentException("请填写取消原因（500字以内）");
-        exam.setStatus(ExamStatus.CANCELLED); exam.setCancellationReason(reason.trim()); exam.setCancelledAt(Instant.now()); exam.setCancelledBy(actor);
-        attemptRepository.findByExamIdOrderByStartedAtDesc(id).forEach(a -> { ExamAttempt locked = lockAttempt(a.getId()); if (locked.getStatus() == AttemptStatus.IN_PROGRESS) { locked.setStatus(AttemptStatus.CANCELLED); locked.setSubmittedAt(Instant.now()); } });
+        exam.setStatus(ExamStatus.CANCELLED); exam.setCancellationReason(reason.trim()); exam.setCancelledAt(Instant.now()); exam.setCancelledBy(privateAdmins.actorLabel(actor));
+        attemptRepository.findByExamIdOrderByStartedAtDesc(id).stream().sorted(Comparator.comparing(ExamAttempt::getId)).forEach(a -> { ExamAttempt locked = lockAttempt(a.getId()); if (locked.getStatus() == AttemptStatus.IN_PROGRESS) { locked.setStatus(AttemptStatus.CANCELLED); locked.setSubmittedAt(Instant.now()); } });
         return ExamDtos.Summary.from(exam);
     }
 
@@ -143,7 +145,7 @@ public class ExamService {
         if (!audienceAllows(exam, user)) throw new org.springframework.security.access.AccessDeniedException("您不在本场考试的发布范围内");
         if (exam.getStatus() == ExamStatus.CANCELLED) throw new IllegalStateException("考试已取消");
         List<ExamAttempt> existing = attemptRepository.findByExamIdAndUserIdOrderByStartedAtDesc(examId, user.getId());
-        for (ExamAttempt item : existing) {
+        for (ExamAttempt item : existing.stream().sorted(Comparator.comparing(ExamAttempt::getId)).toList()) {
             if (item.getStatus() == AttemptStatus.SUBMITTED) finishPendingFillBlanks(lockAttempt(item.getId()));
             if (item.getStatus() == AttemptStatus.IN_PROGRESS) {
                 ExamAttempt active = lockAttempt(item.getId());
@@ -203,7 +205,7 @@ public class ExamService {
     public List<ExamDtos.GradeView> grades(String employeeNo) {
         Long userId = findUser(employeeNo).getId();
         List<ExamAttempt> attempts = attemptRepository.findByUserIdOrderByStartedAtDesc(userId);
-        attempts.forEach(a -> { if (a.getStatus() == AttemptStatus.IN_PROGRESS || a.getStatus() == AttemptStatus.SUBMITTED) expireIfDue(lockAttempt(a.getId())); });
+        attempts.stream().sorted(Comparator.comparing(ExamAttempt::getId)).forEach(a -> { if (a.getStatus() == AttemptStatus.IN_PROGRESS || a.getStatus() == AttemptStatus.SUBMITTED) expireIfDue(lockAttempt(a.getId())); });
         return attempts.stream().map(ExamDtos.GradeView::from).toList();
     }
 
@@ -211,7 +213,7 @@ public class ExamService {
     public List<ExamDtos.GradeView> results(Long examId) {
         findExam(examId);
         List<ExamAttempt> attempts = attemptRepository.findByExamIdOrderByStartedAtDesc(examId);
-        attempts.forEach(a -> { if (a.getStatus() == AttemptStatus.IN_PROGRESS || a.getStatus() == AttemptStatus.SUBMITTED) expireIfDue(lockAttempt(a.getId())); });
+        attempts.stream().sorted(Comparator.comparing(ExamAttempt::getId)).forEach(a -> { if (a.getStatus() == AttemptStatus.IN_PROGRESS || a.getStatus() == AttemptStatus.SUBMITTED) expireIfDue(lockAttempt(a.getId())); });
         return attempts.stream().map(ExamDtos.GradeView::from).toList();
     }
 
@@ -292,15 +294,22 @@ public class ExamService {
             }
             answer.setGradingMethod(GradingMethod.MANUAL);
             answer.setGradingComment(trimToNull(score.comment()));
+            if(answer.getShortReviewState()!=null) {
+                answer.setShortRunToken(null);answer.setShortReviewState("ACCEPTED");answer.setShortRevision(answer.getShortRevision()+1);
+                answer.setShortSampleDisagreed(answer.isShortSampleDisagreed() || (answer.getAiSuggestedPoints()!=null && !answer.getAiSuggestedPoints().equals(score.awardedPoints())));
+                answer.setShortSampleApproved(false);
+            }
         }
         int total = attemptItems(attempt).stream().mapToInt(item -> Optional.ofNullable(answers.get(item.question().getId()).getAwardedPoints()).orElse(0)).sum();
         attempt.setScore(total);
         attempt.setPassed(total >= attempt.getExam().getPassScore());
-        attempt.setStatus(AttemptStatus.GRADED);
-        attempt.setGradedAt(Instant.now());
-        attempt.setGradedByEmployeeNo(graderEmployeeNo);
+        boolean groupedBlanks = ShortAnswerReviewService.centrallyGraded(attempt);
+        attempt.setStatus(groupedBlanks ? AttemptStatus.SUBMITTED : AttemptStatus.GRADED);
+        attempt.setGradedAt(groupedBlanks ? null : Instant.now());
+        attempt.setGradedByEmployeeNo(groupedBlanks ? null : privateAdmins.actorLabel(graderEmployeeNo));
+        if (groupedBlanks) { attempt.setScore(null); attempt.setPassed(null); }
         attempt.setGradingNote(trimToNull(request.overallComment()));
-        GradingRevision revision = new GradingRevision(); revision.setAttemptId(id); revision.setActor(graderEmployeeNo); revision.setRecordedAt(Instant.now()); revision.setComment(request.overallComment());
+        GradingRevision revision = new GradingRevision(); revision.setAttemptId(id); revision.setActor(privateAdmins.actorLabel(graderEmployeeNo)); revision.setRecordedAt(Instant.now()); revision.setComment(request.overallComment());
         try { revision.setScoresJson(new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(request.scores())); } catch (com.fasterxml.jackson.core.JsonProcessingException e) { throw new IllegalStateException("保存判卷记录失败"); }
         entityManager.persist(revision);
         return toReview(attempt);
@@ -397,7 +406,7 @@ public class ExamService {
             }
         }
         attempt.setSubmittedAt(submittedAt);
-        if (requiresManualGrading) {
+        if (requiresManualGrading || attemptItems(attempt).stream().anyMatch(i -> i.type() == QuestionType.FILL_BLANK)) {
             attempt.setScore(null);
             attempt.setPassed(null);
             attempt.setStatus(AttemptStatus.SUBMITTED);
@@ -414,17 +423,7 @@ public class ExamService {
 
     private void gradeObjective(AttemptItem item, AttemptAnswer answer) {
         if (item.type() == QuestionType.FILL_BLANK) {
-            if (FillBlankGrading.needsSemanticReview(item.answer(), answer.getAnswerText())) {
-                answer.setCorrect(null); answer.setAwardedPoints(null); answer.setGradingMethod(null);
-                answer.setAiStatus("FILL_PENDING");
-                answer.setGradingComment("可接受答案未直接匹配，等待AI语义判定；AI不可用时请人工逐空复核。");
-                return;
-            }
-            var result = FillBlankGrading.grade(item.answer(), answer.getAnswerText(), item.points());
-            answer.setCorrect(result.correct());
-            answer.setAwardedPoints(result.points());
-            answer.setGradingMethod(GradingMethod.AUTO);
-            answer.setGradingComment(result.comment());
+            blankReview.initialize(new FillBlankReviewService.Item(item.question().getId(), item.stem(), item.answer(), item.points()), answer);
             return;
         }
         boolean correct = answerGrader.isCorrect(item.type(), item.answer(), answer.getAnswerText());
@@ -445,7 +444,7 @@ public class ExamService {
         for (AttemptItem item : items) {
             if (item.type() != QuestionType.FILL_BLANK) continue;
             AttemptAnswer answer = answers.get(item.question().getId());
-            if (answer != null && (answer.getAwardedPoints() != null || answer.getAiStatus() != null)) continue;
+            if (answer != null && (!answer.getBlankMarks().isEmpty() || answer.getAwardedPoints() != null)) continue;
             if (answer == null) {
                 answer = new AttemptAnswer();
                 answer.setAttempt(attempt);
@@ -455,15 +454,6 @@ public class ExamService {
             }
             gradeObjective(item, answer);
             changed = true;
-        }
-        if (changed && items.stream().allMatch(item -> answers.containsKey(item.question().getId())
-                && answers.get(item.question().getId()).getAwardedPoints() != null)) {
-            int total = items.stream().mapToInt(item -> answers.get(item.question().getId()).getAwardedPoints()).sum();
-            attempt.setScore(total);
-            attempt.setPassed(total >= attempt.getExam().getPassScore());
-            attempt.setStatus(AttemptStatus.GRADED);
-            attempt.setGradedAt(Instant.now());
-            if (attempt.getGradedByEmployeeNo() == null) attempt.setGradedByEmployeeNo("SYSTEM_AUTO");
         }
         return changed;
     }
@@ -475,26 +465,16 @@ public class ExamService {
     }
 
     private boolean needsManual(AttemptItem item, AttemptAnswer answer) {
+        if (item.type() == QuestionType.FILL_BLANK && answer != null && !answer.getBlankMarks().isEmpty()) return false;
         return !answerGrader.isObjective(item.type()) || (item.type() == QuestionType.FILL_BLANK && answer != null
                 && (answer.getAwardedPoints() == null || answer.getGradingMethod() == GradingMethod.MANUAL));
     }
 
+    // Kept for compatibility with older callers; exam blanks no longer accept AI decisions.
     @Transactional
     public void resolveFillBlank(Long attemptId, Long questionId, FillBlankGrading.Result result, String model) {
         ExamAttempt attempt = lockAttempt(attemptId);
-        if (attempt.getStatus() != AttemptStatus.SUBMITTED || attempt.getExam().getStatus() == ExamStatus.CANCELLED) return;
-        AttemptAnswer answer = answerMap(attempt).get(questionId);
-        if (answer == null || answer.getAwardedPoints() != null || !"FILL_PENDING".equals(answer.getAiStatus())) return;
-        if (result == null) {
-            answer.setAiStatus("FILL_FAILED"); answer.setGradingComment("AI语义判定未完成，请人工逐空核对后评分。"); return;
-        }
-        answer.setCorrect(result.correct()); answer.setAwardedPoints(result.points()); answer.setGradingMethod(GradingMethod.AI);
-        answer.setGradingComment("标准答案与AI逐空语义判定。" + result.comment()); answer.setAiStatus("READY"); answer.setAiModel(model);
-        if (attempt.getAnswers().size() == attemptItems(attempt).size() && attempt.getAnswers().stream().allMatch(a -> a.getAwardedPoints() != null)) {
-            int total = attempt.getAnswers().stream().mapToInt(AttemptAnswer::getAwardedPoints).sum();
-            attempt.setScore(total); attempt.setPassed(total >= attempt.getExam().getPassScore()); attempt.setStatus(AttemptStatus.GRADED);
-            attempt.setGradedAt(Instant.now()); attempt.setGradedByEmployeeNo("SYSTEM_AI");
-        }
+        finishPendingFillBlanks(attempt);
     }
 
     private void validate(ExamDtos.SaveRequest r) {
@@ -629,7 +609,9 @@ public class ExamService {
     }
 
     private boolean audienceAllows(Exam exam, AppUser user) {
+        if (!privateAdmins.visible(user)) return false;
         if (user.getStatus() != UserStatus.ACTIVE || user.getRoles().stream().noneMatch(r -> r.effectiveAuthority().equals("CANDIDATE"))) return false;
+        if (exam.isAudienceFrozen()) return exam.getAudienceUserIds().contains(user.getId());
         if (exam.getAudienceMode() == null || exam.getAudienceMode().equals("ALL")) return true;
         return exam.getAudienceUserIds().contains(user.getId());
     }
@@ -639,8 +621,14 @@ public class ExamService {
             exam.setAudienceMode("USERS"); exam.getAudienceUserIds().clear();
             exam.getAudienceUserIds().addAll(failedCandidates(lockExam(exam.getMakeupSourceExamId())));
         }
-        if (exam.getAudienceMode() == null || exam.getAudienceMode().equals("ALL")) return;
-        var active = userRepository.findDistinctByRoles_CodeAndStatus("CANDIDATE", UserStatus.ACTIVE);
+        var active = userRepository.findAll().stream().filter(privateAdmins::visible)
+                .filter(u -> u.getStatus() == UserStatus.ACTIVE && u.getRoles().stream().anyMatch(r -> "CANDIDATE".equals(r.effectiveAuthority()))).toList();
+        if (exam.getAudienceMode() == null || exam.getAudienceMode().equals("ALL")) {
+            exam.getAudienceUserIds().clear();
+            active.forEach(u -> exam.getAudienceUserIds().add(u.getId()));
+            exam.setAudienceFrozen(true);
+            return;
+        }
         if (exam.getAudienceMode().equals("MAJORS")) {
             exam.getAudienceUserIds().clear();
             active.stream().filter(u -> exam.getAudienceMajors().contains(u.getProfessionalDirection())).forEach(u -> exam.getAudienceUserIds().add(u.getId()));

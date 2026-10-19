@@ -10,6 +10,7 @@ public record LoginResponse(
         String employeeNo,
         String name,
         Set<String> roles,
-        boolean mustChangePassword
+        boolean mustChangePassword,
+        boolean canManageSystem
 ) {}
 

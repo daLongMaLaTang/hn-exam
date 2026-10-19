@@ -42,6 +42,9 @@ public class AppUser {
     @Column(nullable = false, columnDefinition = "integer default 0")
     private int authVersion;
 
+    @Column(nullable = false, columnDefinition = "boolean default false")
+    private boolean privateAdministrator;
+
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 20)
     private UserStatus status = UserStatus.ACTIVE;

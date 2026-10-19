@@ -9,7 +9,8 @@ export default defineConfig({
 
     // 允许 Cloudflare 公网域名访问
     allowedHosts: [
-      'wrap-calendars-armstrong-poor.trycloudflare.com'
+      'wrap-calendars-armstrong-poor.trycloudflare.com',
+      'applies-generated-ruled-strengths.trycloudflare.com'
     ],
 
     // 保留 Spring Boot 后端接口代理

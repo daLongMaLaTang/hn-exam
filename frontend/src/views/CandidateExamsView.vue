@@ -1,10 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, onBeforeUnmount, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRouter, useRoute } from 'vue-router'
 import { api } from '../api'
 import { errorText, formatDate, type Attempt, type Exam, type Grade } from '../candidates/types'
 const router = useRouter()
+const route = useRoute()
 const exams = ref<Exam[]>([])
+const focusedExamId = computed(() => Number(route.query.examId) || null)
+const shownExams = computed(() => focusedExamId.value ? exams.value.filter(e => e.id === focusedExamId.value) : exams.value)
 const grades = ref<Grade[]>([])
 const loading = ref(true)
 const starting = ref<number | null>(null)
@@ -53,10 +56,11 @@ onBeforeUnmount(() => { window.clearInterval(clock); window.clearInterval(refres
   <div class="page-head"><div><span class="eyebrow dark">MY EXAMINATIONS</span><h1>我的考试</h1><p>查看考试通知、参加考试和补考，作答期间会自动保存答案。</p></div><RouterLink to="/my-grades" class="secondary-button">我的成绩</RouterLink></div>
   <div class="notice">已发布 {{ exams.length }} 场考试，其中 {{ available }} 场尚未截止。进入考试前请确认网络连接正常。</div>
   <p v-if="error" class="notice error" role="alert">{{ error }}</p>
+  <p v-if="focusedExamId" class="notice">正在查看通知对应的考试。<RouterLink to="/my-exams">查看全部考试</RouterLink><span v-if="!loading && !shownExams.length"> 该考试已关闭或不在当前可参加范围内。</span></p>
   <article v-if="loading" class="panel"><div class="empty">正在加载考试安排…</div></article>
   <article v-else-if="!exams.length" class="panel"><div class="empty"><span>考</span><h3>暂无已发布考试</h3><p>管理员发布考试后，考试通知将显示在这里。</p><button class="secondary-button" @click="load">刷新列表</button></div></article>
   <div v-else class="candidate-exam-grid">
-    <article v-for="exam in exams" :key="exam.id" class="panel candidate-exam-card">
+    <article v-for="exam in shownExams" :key="exam.id" class="panel candidate-exam-card">
       <div class="panel-head"><span class="status-pill" :class="stateTone(exam)">{{ examState(exam) }}</span><span class="date-chip">{{ exam.wrongQuestionPaper ? '个人专属试卷' : exam.questionCount + ' 道题' }}</span></div>
       <p v-if="exam.cancellationReason" class="notice error">取消原因：{{ exam.cancellationReason }}</p><div class="exam-course-label">{{ exam.courseCode || '综合课程' }}</div><h2>{{ exam.title }}</h2><p class="exam-description">{{ exam.description || '请按考试要求独立完成答题；含主观题的试卷将在人工判卷后公布成绩。' }}</p>
       <div class="exam-metrics"><div><strong>{{ exam.durationMinutes }}<small>分钟</small></strong><span>考试时长</span></div><div><strong>{{ exam.totalScore }}<small>分</small></strong><span>试卷总分</span></div><div><strong>{{ exam.passScore }}<small>分</small></strong><span>及格分数</span></div></div>
@@ -64,7 +68,7 @@ onBeforeUnmount(() => { window.clearInterval(clock); window.clearInterval(refres
       <button class="primary-button" :disabled="!canStart(exam) || starting !== null" @click="selected = exam">{{ examState(exam) }}</button>
     </article>
   </div>
-  <div v-if="selected" class="exam-dialog-backdrop" @click.self="!starting && (selected = null)"><section class="exam-dialog" role="dialog" aria-modal="true" aria-labelledby="exam-confirm-title"><span class="eyebrow dark">EXAM INSTRUCTIONS</span><h2 id="exam-confirm-title">{{ selected.title }}</h2><p>确认进入后开始计时，刷新或离开页面不会暂停计时。</p><ul><li>考试时长 {{ selected.durationMinutes }} 分钟，总分 {{ selected.totalScore }} 分，{{ selected.passScore }} 分及格。</li><li>答案会定期保存，请留意页面中的保存提示。</li><li v-if="selected.basicAntiCheat !== false">离开当前考试页面或切换应用累计 2 次自动交卷，电脑和手机均适用。</li><li>考试时间结束后自动交卷；普通浏览器只能记录页面可见性和焦点变化。</li><li>提前交卷后不能修改答案。</li></ul><div class="dialog-actions"><button class="secondary-button" :disabled="starting !== null" @click="selected = null">暂不进入</button><button class="primary-button" :disabled="starting !== null" @click="start">{{ starting ? '正在进入…' : activeFor(selected.id) ? '继续考试' : '确认开始' }}</button></div></section></div>
+  <div v-if="selected" class="exam-dialog-backdrop" @click.self="!starting && (selected = null)"><section class="exam-dialog" role="dialog" aria-modal="true" aria-labelledby="exam-confirm-title"><span class="eyebrow dark">EXAM INSTRUCTIONS</span><h2 id="exam-confirm-title">{{ selected.title }}</h2><p>确认进入后开始计时，刷新或离开页面不会暂停计时。</p><ul><li>考试时长 {{ selected.durationMinutes }} 分钟，总分 {{ selected.totalScore }} 分，{{ selected.passScore }} 分及格。</li><li>答案会定期保存，请留意页面中的保存提示。</li><li v-if="selected.basicAntiCheat !== false">离开当前考试页面或切换应用累计 2 次自动交卷，电脑和手机均适用。</li><li>考试时间结束后自动交卷；普通浏览器只能记录页面可见性和焦点变化。</li><li>考试期间禁止复制、剪切、粘贴及拖入答案，请独立作答。</li><li>提前交卷后不能修改答案。</li></ul><div class="dialog-actions"><button class="secondary-button" :disabled="starting !== null" @click="selected = null">暂不进入</button><button class="primary-button" :disabled="starting !== null" @click="start">{{ starting ? '正在进入…' : activeFor(selected.id) ? '继续考试' : '确认开始' }}</button></div></section></div>
 </template>
 
 <style scoped>

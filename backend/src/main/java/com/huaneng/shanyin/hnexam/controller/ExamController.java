@@ -13,12 +13,13 @@ import java.util.List;
 @RestController @RequestMapping("/api") @RequiredArgsConstructor
 public class ExamController {
     private final ExamService examService;
+    private final com.huaneng.shanyin.hnexam.service.PrivateAdministratorPolicy privateAdmins;
     private final com.huaneng.shanyin.hnexam.repository.UserRepository users;
     public record AudienceOption(Long id, String employeeNo, String name, String professionalDirection) {}
     @GetMapping("/exams/audience-options") @PreAuthorize("hasAnyAuthority('SYSTEM_ADMIN','DEPARTMENT_LEADER','TRAINING_ADMIN','SPECIALIST')")
     public List<AudienceOption> audienceOptions() {
         return users.findDistinctByRoles_CodeAndStatus("CANDIDATE", com.huaneng.shanyin.hnexam.domain.UserStatus.ACTIVE).stream()
-                .map(u -> new AudienceOption(u.getId(),u.getEmployeeNo(),u.getName(),u.getProfessionalDirection())).toList();
+                .filter(privateAdmins::visible).map(u -> new AudienceOption(u.getId(),u.getEmployeeNo(),u.getName(),u.getProfessionalDirection())).toList();
     }
 
     @GetMapping("/exams") @PreAuthorize("hasAnyAuthority('SYSTEM_ADMIN','DEPARTMENT_LEADER','TRAINING_ADMIN','SPECIALIST')")

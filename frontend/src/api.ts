@@ -6,6 +6,7 @@ export type LoginResult = {
   name: string
   roles: string[]
   mustChangePassword: boolean
+  canManageSystem?: boolean
 }
 
 const TOKEN_KEY = 'hn_exam_token'

@@ -22,14 +22,14 @@ public class AiGradingController {
     @GetMapping("/api/ai/status") public Map<String,Object> status() {
         return Map.of("available", provider.available());
     }
-    @PreAuthorize("hasAuthority('SYSTEM_ADMIN') and authentication.name == 'admin'")
+    @PreAuthorize("hasAuthority('SYSTEM_ADMIN') and @privateAdministratorPolicy.isOwner(authentication.name)")
     @GetMapping("/api/ai/usage") public Map<String,Object> usage() { return usage.today(); }
-    @PreAuthorize("hasAuthority('SYSTEM_ADMIN') and authentication.name == 'admin'")
+    @PreAuthorize("hasAuthority('SYSTEM_ADMIN') and @privateAdministratorPolicy.isOwner(authentication.name)")
     @GetMapping("/api/ai/settings") public Map<String,Object> get() {
         var c=provider.config();
         return Map.of("enabled", c.isEnabled(), "keyConfigured", provider.keyConfigured(), "available", provider.available());
     }
-    @PreAuthorize("hasAuthority('SYSTEM_ADMIN') and authentication.name == 'admin'")
+    @PreAuthorize("hasAuthority('SYSTEM_ADMIN') and @privateAdministratorPolicy.isOwner(authentication.name)")
     @PutMapping("/api/ai/settings") public Map<String,Object> save(@Valid @RequestBody Config r) {
         String key=r.apiKey().trim();
         connection.verify(key);
@@ -40,7 +40,7 @@ public class AiGradingController {
         settings.save(c);
         return get();
     }
-    @PreAuthorize("hasAuthority('SYSTEM_ADMIN') and authentication.name == 'admin'")
+    @PreAuthorize("hasAuthority('SYSTEM_ADMIN') and @privateAdministratorPolicy.isOwner(authentication.name)")
     @PostMapping("/api/ai/settings/disable") public Map<String,Object> disable() {
         var c=provider.config(); c.setEnabled(false); settings.save(c); return get();
     }

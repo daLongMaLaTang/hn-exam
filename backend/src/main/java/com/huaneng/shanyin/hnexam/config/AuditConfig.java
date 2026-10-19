@@ -12,12 +12,13 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
 @Configuration @RequiredArgsConstructor
 public class AuditConfig implements WebMvcConfigurer {
+    private final com.huaneng.shanyin.hnexam.service.PrivateAdministratorPolicy privateAdmins;
     private final AuditEventRepository events;
     @Override public void addInterceptors(InterceptorRegistry registry) {
         registry.addInterceptor(new HandlerInterceptor() {
             @Override public void afterCompletion(HttpServletRequest request, HttpServletResponse response, Object handler, Exception ex) {
                 if (java.util.Set.of("GET","HEAD","OPTIONS").contains(request.getMethod()) || request.getUserPrincipal()==null) return;
-                var event = new AuditEvent(); event.setActor(request.getUserPrincipal().getName());
+                var event = new AuditEvent(); event.setActor(privateAdmins.actorLabel(request.getUserPrincipal().getName()));
                 event.setMethod(request.getMethod()); event.setPath(request.getRequestURI()); event.setResponseStatus(response.getStatus());
                 events.save(event);
             }

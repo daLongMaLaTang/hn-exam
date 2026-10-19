@@ -23,6 +23,7 @@ import java.util.stream.Collectors;
 @Service
 @RequiredArgsConstructor
 public class AuthService {
+    private final com.huaneng.shanyin.hnexam.service.PrivateAdministratorPolicy privateAdmins;
     private final AuthenticationManager authenticationManager;
     private final JwtEncoder jwtEncoder;
     private final UserRepository userRepository;
@@ -63,7 +64,7 @@ public class AuthService {
         String token = jwtEncoder.encode(JwtEncoderParameters.from(
                 JwsHeader.with(MacAlgorithm.HS256).build(), claims)).getTokenValue();
         return new LoginResponse(token, expiresAt, user.getId(), user.getEmployeeNo(), user.getName(), roles,
-                user.isMustChangePassword());
+                user.isMustChangePassword(), privateAdmins.canManageSystem(user));
     }
 }
 

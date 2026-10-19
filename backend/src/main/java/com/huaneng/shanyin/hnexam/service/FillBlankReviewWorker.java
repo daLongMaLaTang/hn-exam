@@ -7,7 +7,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.support.TransactionTemplate;
 
-@Component @RequiredArgsConstructor
+@RequiredArgsConstructor
 public class FillBlankReviewWorker {
     private final ExamAttemptRepository attempts;
     private final ExamService exams;

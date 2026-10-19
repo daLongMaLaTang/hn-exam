@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { currentUser, signOut, hasRole } from './api'
 import AppIcon from './components/AppIcon.vue'
+import NotificationLink from './components/NotificationLink.vue'
 const route = useRoute(), router = useRouter(), user = computed(() => { void route.path; return currentUser() })
 const isLogin = computed(() => route.path === '/login')
 const isAdmin = computed(() => user.value?.roles.some(r => r !== 'CANDIDATE'))
@@ -19,16 +20,14 @@ function logout(){ signOut(); router.push('/login') }
 </script>
 <template>
   <router-view v-if="isLogin" />
-  <div v-else class="shell">
-    <aside class="sidebar">
-      <div class="brand"><div class="brand-mark"><span>HN</span></div><div><strong>培训考试系统</strong><small>华能山阴生产准备部</small></div></div>
-      <div class="nav-label">{{isAdmin ? '管理中心' : '学习导航'}}</div>
-      <nav><RouterLink v-for="item in navigation" :key="item.path" :to="item.path"><span class="nav-icon"><AppIcon :name="item.icon" /></span><span class="nav-text">{{item.label}}</span><i aria-hidden="true"></i></RouterLink></nav>
-      <div class="side-foot"><span class="side-status"><i></i>服务正常</span><small>当前身份</small><strong>{{isAdmin?'管理人员':'考生'}}</strong></div>
-    </aside>
-    <main class="main">
-      <header class="topbar"><div class="system-state"><span class="online-dot"></span><span>系统运行正常</span><small>数据实时保存</small></div><div class="profile"><span class="avatar">{{user?.name?.slice(0,1)}}</span><span class="profile-copy"><strong>{{user?.name}}</strong><small>{{user?.employeeNo}}</small></span><button class="link-button logout-button" @click="logout">退出登录</button></div></header>
-      <section class="content"><router-view /></section>
-    </main>
+  <div v-else class="workspace-shell">
+    <a class="skip-link" href="#workspace-main">跳到主要内容</a>
+    <header class="workspace-header">
+      <RouterLink to="/" class="workspace-brand" aria-label="培训考试系统首页"><span class="workspace-mark" aria-hidden="true"><AppIcon name="questions" /></span><span><strong>培训考试系统</strong><small>TRAINING & EXAMINATION</small></span></RouterLink>
+      <div class="workspace-profile"><NotificationLink v-if="user?.roles.includes('CANDIDATE')" /><span class="avatar" aria-hidden="true">{{user?.name?.slice(0,1)}}</span><div><strong>{{user?.name}}</strong><small>{{isAdmin?'管理工作空间':'学习工作空间'}}</small></div><button class="link-button" @click="logout">退出登录</button></div>
+    </header>
+    <div class="workspace-nav-band"><nav class="workspace-nav" aria-label="主导航"><RouterLink v-for="item in navigation" :key="item.path" :to="item.path"><AppIcon :name="item.icon" /><span>{{item.label}}</span></RouterLink></nav></div>
+    <main id="workspace-main" class="workspace-main" tabindex="-1"><router-view /></main>
+    <footer class="workspace-footer"><span>培训考试系统</span><span>学习有记录 · 考核有依据</span></footer>
   </div>
 </template>

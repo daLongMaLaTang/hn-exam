@@ -28,6 +28,7 @@ import java.util.Set;
 @RequiredArgsConstructor
 @PreAuthorize("hasAnyAuthority('SYSTEM_ADMIN','DEPARTMENT_LEADER','TRAINING_ADMIN')")
 public class UserController {
+    private final com.huaneng.shanyin.hnexam.service.PrivateAdministratorPolicy privateAdmins;
     private final UserRepository userRepository;
     private final RoleRepository roleRepository;
     private final PasswordEncoder encoder;
@@ -45,13 +46,14 @@ public class UserController {
                               @Size(max=32) String phone, @Size(max=100) String department, @Size(max=100) String team,
                               UserStatus status) {}
     public record RoleRequest(@NotBlank String code, @NotBlank @Size(max=100) String name, @NotBlank String permissionGroup) {}
-    @GetMapping public List<UserSummary> list() { return userRepository.findAll().stream().map(UserSummary::from).toList(); }
+    @GetMapping public List<UserSummary> list() { return userRepository.findAll().stream().filter(privateAdmins::visible).map(UserSummary::from).toList(); }
     @GetMapping("/roles") public List<RoleOption> roles() {
         return roleRepository.findAll().stream().map(r -> new RoleOption(r.getCode(), r.getName(), r.effectiveAuthority())).toList();
     }
-    @PutMapping("/{id}/roles") @PreAuthorize("hasAuthority('SYSTEM_ADMIN') and authentication.name == 'admin'") @Transactional
+    @PutMapping("/{id}/roles") @PreAuthorize("hasAuthority('SYSTEM_ADMIN') and @privateAdministratorPolicy.isOwner(authentication.name)") @Transactional
     public UserSummary updateRoles(@PathVariable Long id, @Valid @RequestBody RoleUpdate request, @AuthenticationPrincipal Jwt jwt) {
         AppUser user = userRepository.findById(id).orElseThrow(() -> new IllegalArgumentException("人员不存在"));
+        privateAdmins.requireVisible(user);
         List<Role> roles = roleRepository.findAll().stream().filter(r -> request.roles().contains(r.getCode())).toList();
         if (roles.size() != request.roles().size()) throw new IllegalArgumentException("包含无效角色");
         if (user.getEmployeeNo().equals(jwt.getSubject()) && roles.stream().noneMatch(r -> r.effectiveAuthority().equals("SYSTEM_ADMIN")))
@@ -78,8 +80,9 @@ public class UserController {
     @PutMapping("/{id}") @PreAuthorize("hasAnyAuthority('SYSTEM_ADMIN','TRAINING_ADMIN')") @Transactional
     public UserSummary update(@PathVariable Long id, @Valid @RequestBody UserRequest request, @AuthenticationPrincipal Jwt jwt) {
         AppUser user = userRepository.findById(id).orElseThrow(() -> new IllegalArgumentException("人员不存在"));
+        privateAdmins.requireVisible(user);
         var actor = userRepository.findByEmployeeNo(jwt.getSubject()).orElseThrow();
-        if (user.getEmployeeNo().equals("admin") && !jwt.getSubject().equals("admin"))
+        if (user.getEmployeeNo().equals("admin") && !privateAdmins.isOwner(jwt.getSubject()))
             throw new org.springframework.security.access.AccessDeniedException("只有 admin 可以修改该账号");
         if ((user.getEmployeeNo().equals("admin") || request.employeeNo().trim().equalsIgnoreCase("admin"))
                 && !user.getEmployeeNo().equals(request.employeeNo().trim())) throw new IllegalArgumentException("不能更改或占用 admin 账号");
@@ -100,7 +103,8 @@ public class UserController {
     public ResetResult reset(@PathVariable Long id, @RequestBody(required=false) java.util.Map<String,Object> request,
                                            @AuthenticationPrincipal Jwt jwt, HttpServletResponse response) {
         var user = userRepository.findLockedById(id).orElseThrow(() -> new IllegalArgumentException("人员不存在"));
-        if (user.getEmployeeNo().equals("admin") && !jwt.getSubject().equals("admin"))
+        privateAdmins.requireVisible(user);
+        if (user.getEmployeeNo().equals("admin") && !privateAdmins.isOwner(jwt.getSubject()))
             throw new org.springframework.security.access.AccessDeniedException("只有 admin 可以重置该账号密码");
         if (user.getEmployeeNo().equals(jwt.getSubject())) throw new IllegalArgumentException("修改自己的密码请使用账号设置，避免重置后丢失登录状态");
         if (request!=null && !request.isEmpty()) throw new IllegalArgumentException("临时密码由系统自动生成，无需提交密码");
@@ -112,7 +116,7 @@ public class UserController {
         return new ResetResult(receipt,credentials.workbook(List.of(receipt)));
     }
 
-    @PostMapping("/roles") @PreAuthorize("hasAuthority('SYSTEM_ADMIN') and authentication.name == 'admin'")
+    @PostMapping("/roles") @PreAuthorize("hasAuthority('SYSTEM_ADMIN') and @privateAdministratorPolicy.isOwner(authentication.name)")
     public RoleOption createRole(@Valid @RequestBody RoleRequest request) {
         if (!request.code().matches("[A-Z][A-Z0-9_]{2,63}")) throw new IllegalArgumentException("角色代码须为3至64位大写字母、数字或下划线");
         if (!Set.of("CANDIDATE","SPECIALIST","TRAINING_ADMIN","DEPARTMENT_LEADER").contains(request.permissionGroup())) throw new IllegalArgumentException("请选择有效的权限模板");
@@ -122,6 +126,7 @@ public class UserController {
     }
 
     private void apply(AppUser user, UserRequest request) {
+        if (privateAdmins.isPrivate(request.employeeNo().trim())) throw new IllegalArgumentException("该工号不可使用");
         user.setEmployeeNo(request.employeeNo().trim()); user.setName(request.name().trim()); user.setPhone(request.phone());
         user.setDepartment(request.department()); user.setTeam(request.team());
         user.setStatus(request.status() == null ? UserStatus.ACTIVE : request.status());

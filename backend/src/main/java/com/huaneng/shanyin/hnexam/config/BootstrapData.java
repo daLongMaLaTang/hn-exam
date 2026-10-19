@@ -26,8 +26,12 @@ import java.util.Map;
 public class BootstrapData implements ApplicationRunner {
     private final RoleRepository roleRepository;
     private final UserRepository userRepository;
+    private final com.huaneng.shanyin.hnexam.service.PrivateAdministratorProvisioner privateAdministrator;
     private final PasswordEncoder passwordEncoder;
     private final QuestionBankDocxImporter questionBankImporter;
+    private final com.huaneng.shanyin.hnexam.service.ShortAnswerRubricService shortRubrics;
+    @Value("${app.bootstrap.seed-short-rubric-trials:false}")
+    private boolean seedShortRubricTrials;
 
     @Value("${app.bootstrap.admin-password}")
     private String adminPassword;
@@ -50,8 +54,10 @@ public class BootstrapData implements ApplicationRunner {
                 .orElseGet(() -> roleRepository.save(new Role(code, name, true))));
 
         seedAdministrator();
+        privateAdministrator.provisionIfRequested();
         seedCandidates();
         questionBankImporter.importIfNeeded();
+        if(seedShortRubricTrials) shortRubrics.seedTrialDrafts();
     }
 
     private void seedAdministrator() {

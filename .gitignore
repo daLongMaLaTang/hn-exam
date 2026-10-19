@@ -29,3 +29,12 @@ logs/
 *.pfx
 backend/src/main/resources/bootstrap/candidates.csv
 
+# 生产部署产物：体积大或含密钥，不进代码库
+deploy/prod/app.jar
+deploy/prod/www/
+deploy/prod/data/
+deploy/prod/backup/
+deploy/prod/initdb/*.sql
+deploy/prod/*.sql
+deploy/prod/*.sql.gz
+

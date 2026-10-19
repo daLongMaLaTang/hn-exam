@@ -21,6 +21,7 @@ import java.util.Map;
 @RequestMapping("/api/auth")
 @RequiredArgsConstructor
 public class AuthController {
+    private final com.huaneng.shanyin.hnexam.service.PrivateAdministratorPolicy privateAdmins;
     private final AuthService authService;
     private final UserRepository users;
     private final PasswordEncoder encoder;
@@ -53,7 +54,7 @@ public class AuthController {
         var user = users.findByEmployeeNo(jwt.getSubject()).orElseThrow();
         return Map.of("userId", user.getId(), "employeeNo", user.getEmployeeNo(), "name", user.getName(),
                 "roles", user.getRoles().stream().map(role -> role.effectiveAuthority()).toList(),
-                "mustChangePassword", user.isMustChangePassword());
+                "mustChangePassword", user.isMustChangePassword(), "canManageSystem", privateAdmins.canManageSystem(user));
     }
 }
 

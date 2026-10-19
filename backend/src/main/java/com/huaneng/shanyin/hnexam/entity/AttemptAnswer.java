@@ -13,6 +13,21 @@ import lombok.Setter;
 @Setter
 @NoArgsConstructor
 public class AttemptAnswer {
+    private Long shortRubricId;
+    private String shortReviewState;
+    @Column(nullable=false,columnDefinition="boolean default false") private boolean shortSampleApproved;
+    @Column(nullable=false,columnDefinition="boolean default false") private boolean shortSampleDisagreed;
+    private String shortRunToken;
+    private java.time.Instant shortRunStartedAt;
+    @Column(nullable=false,columnDefinition="bigint default 0")
+    private long shortRevision;
+    @Lob @Column(length=org.hibernate.Length.LONG32)
+    private String shortEvaluationJson;
+    @Lob @Column(length=org.hibernate.Length.LONG32)
+    private String shortRisksJson;
+    @OneToMany(mappedBy="answer", cascade=CascadeType.ALL, orphanRemoval=true)
+    @OrderBy("slot asc")
+    private java.util.List<FillBlankMark> blankMarks = new java.util.ArrayList<>();
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;

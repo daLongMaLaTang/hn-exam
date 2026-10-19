@@ -1,0 +1,104 @@
+# 免费试用机 / 内网验证专用编排（不用于正式上线）
+#
+# 与 docker-compose.yml 的区别：
+#   1. 没有 Caddy，不申请证书，直接用 http://IP:8080 访问
+#   2. app 端口绑到 0.0.0.0，公网可访问（正式环境必须只绑 127.0.0.1）
+#   3. MySQL 缓冲池压到 128M，JVM 堆 512M，让 2核2G 的免费机也能跑起来
+#
+# 用法：
+#   cp .env.example .env    # SITE_DOMAIN 随便填，本文件用不到
+#   docker compose -f docker-compose.verify.yml up -d --build
+#   浏览器打开 http://服务器公网IP:8080
+#
+# 验证完记得改成正式编排：
+#   docker compose -f docker-compose.verify.yml down
+#   docker compose up -d --build
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: hnexam-mysql
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-time-zone=+08:00
+      # 小内存机器必须压到 128M，否则 MySQL 起不来
+      - --innodb-buffer-pool-size=128M
+      - --max-connections=100
+    volumes:
+      - ./data/mysql:/var/lib/mysql
+    ports:
+      - "127.0.0.1:3306:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 40s
+
+  redis:
+    image: redis:7-alpine
+    container_name: hnexam-redis
+    restart: always
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - ./data/redis:/data
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hnexam-app
+    restart: always
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      TZ: Asia/Shanghai
+      SPRING_PROFILES_ACTIVE: mysql
+
+      HNEXAM_DB_URL: jdbc:mysql://mysql:3306/${MYSQL_DATABASE}?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
+      HNEXAM_DB_USER: ${MYSQL_USER}
+      HNEXAM_DB_PASSWORD: ${MYSQL_PASSWORD}
+      # 免费机内存小，连接池压到 10
+      HNEXAM_DB_POOL_MAX: "10"
+      HNEXAM_DB_POOL_MIN: "2"
+
+      HNEXAM_REDIS_ENABLED: "true"
+      HNEXAM_REDIS_HOST: redis
+      HNEXAM_REDIS_PORT: "6379"
+      HNEXAM_REDIS_PASSWORD: ${REDIS_PASSWORD}
+
+      HNEXAM_JWT_SECRET: ${HNEXAM_JWT_SECRET}
+      HNEXAM_QUESTION_BANK_PATH: ""
+      HNEXAM_BOOTSTRAP_PASSWORD: ${HNEXAM_BOOTSTRAP_PASSWORD}
+
+      HNEXAM_AI_API_KEY: ${HNEXAM_AI_API_KEY:-}
+      HNEXAM_AI_MASTER_KEY_FILE: /app/.local/ai-master.key
+
+      # 用 IP 访问，同源，无需跨域白名单；这里放宽只是为了排障方便
+      APP_WEB_ALLOWEDORIGINS: "*"
+
+      JAVA_OPTS: -Xms128m -Xmx512m -XX:+UseSerialGC -Dfile.encoding=UTF-8
+    volumes:
+      - ./data/app:/app/.local
+      - ./data/logs:/app/logs
+    ports:
+      # 验证阶段直接暴露 8080，正式环境删掉这一行
+      - "8080:8080"

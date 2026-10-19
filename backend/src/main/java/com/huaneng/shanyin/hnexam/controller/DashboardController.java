@@ -21,6 +21,7 @@ import java.util.Map;
 @RequestMapping("/api/dashboard")
 @RequiredArgsConstructor
 public class DashboardController {
+    private final com.huaneng.shanyin.hnexam.service.PrivateAdministratorPolicy privateAdmins;
     private final UserRepository userRepository;
     private final QuestionRepository questionRepository;
     private final ExamRepository exams;
@@ -38,7 +39,7 @@ public class DashboardController {
         String selected;
         try { selected = (month == null ? java.time.YearMonth.now(java.time.ZoneId.of("Asia/Shanghai")) : java.time.YearMonth.parse(month)).toString(); }
         catch (java.time.DateTimeException e) { throw new IllegalArgumentException("月份格式应为 YYYY-MM"); }
-        return userRepository.findAll().stream().map(u -> {
+        return userRepository.findAll().stream().filter(privateAdmins::visible).map(u -> {
             var analysis = profiles.get(u.getId()).months().stream().filter(m -> m.month().equals(selected)).findFirst()
                     .orElse(new ProfileController.Month(selected, 0, 0, 0, 0));
             var wrong = wrongQuestions.summary(u.getId(), "EXAM");
@@ -72,7 +73,7 @@ public class DashboardController {
                     "passedCount", attempts.countPassedExamsByUserId(user.getId(), ExamStatus.CANCELLED));
         }
         return Map.of(
-                "userCount", userRepository.count(),
+                "userCount", userRepository.findAll().stream().filter(privateAdmins::visible).count(),
                 "questionCount", questionRepository.countByDeletedFalse(),
                 "pendingQuestionCount", questionRepository.countByStatus(QuestionStatus.PENDING_REVIEW),
                 "activeQuestionCount", questionRepository.countByStatus(QuestionStatus.ACTIVE),
