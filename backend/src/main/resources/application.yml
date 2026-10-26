@@ -54,6 +54,7 @@ server:
 
 app:
   exams:
+    submission-grace-seconds: 10
     expiry-check-ms: 15000
     expiry-batch-size: 100
     expiry-max-batches: 20
@@ -78,6 +79,8 @@ app:
     allowed-origins: "http://localhost:5173,http://127.0.0.1:5173,https://wrap-calendars-armstrong-poor.trycloudflare.com,https://applies-generated-ruled-strengths.trycloudflare.com"
 
   ai:
+    # Enable only after the additive migration has been applied and verified.
+    short-automation-enabled: ${HNEXAM_SHORT_AUTOMATION_ENABLED:false}
     api-key: ${HNEXAM_AI_API_KEY:}
     master-key-file: ${HNEXAM_AI_MASTER_KEY_FILE:../.local/ai-master.key}
     limits:

@@ -39,6 +39,8 @@ export type Attempt = {
   status: string
   startedAt: string
   deadline: string
+  submissionDeadline: string
+  answerRevision: number
   serverTime?: string
   focusLossCount?: number
   basicAntiCheat?: boolean

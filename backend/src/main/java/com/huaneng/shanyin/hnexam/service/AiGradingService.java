@@ -10,11 +10,12 @@ import java.util.*; import java.util.concurrent.ConcurrentHashMap;
 @Service @RequiredArgsConstructor
 public class AiGradingService {
     private final ExamService exams; private final ExamAttemptRepository attempts; private final OpenAiCompatibleGradingProvider provider; private final TransactionTemplate tx;
-    private final ShortAnswerReviewService shortReview;
+    private final ShortAnswerAutomationService shortAutomation;
     private final Set<String> running=ConcurrentHashMap.newKeySet();
-    public Map<String,String> suggest(Long id,Long questionId) {
+    public Map<String,String> suggest(Long id,Long questionId) {return suggest(id,questionId,null);}
+    public Map<String,String> suggest(Long id,Long questionId,String actor) {
         var initial=exams.review(id,null);
-        if(initial.questions().stream().anyMatch(q->q.id().equals(questionId)&&q.type()==QuestionType.SHORT_ANSWER)) return shortReview.suggest(id,questionId);
+        if(initial.questions().stream().anyMatch(q->q.id().equals(questionId)&&q.type()==QuestionType.SHORT_ANSWER)) return shortAutomation.startForAttempt(id,actor);
         if(!provider.available()) throw new IllegalStateException("AI未启用或缺少配置，请继续人工判卷");
         String key=id+":"+questionId;
         if(!running.add(key)) throw new IllegalStateException("该题正在生成建议，请稍后刷新");

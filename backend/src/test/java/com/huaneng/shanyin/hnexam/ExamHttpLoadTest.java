@@ -159,7 +159,8 @@ class ExamHttpLoadTest {
             runPhase(executor, count, 0, i -> {
                 var grade = request("submit", "POST", "/api/candidate/attempts/" + attempts[i] + "/submit", tokens.get(i), body(items, i, true));
                 assertThat(grade.path("status").asText()).isEqualTo("GRADED");
-                assertThat(grade.path("score").asInt()).isEqualTo(i % 2 == 0 ? 98 : 2);
+                assertThat(grade.path("answersAccepted").asBoolean()).isTrue();
+                assertThat(grade.path("grade").path("score").asInt()).isEqualTo(i % 2 == 0 ? 98 : 2);
             });
             // Read back every paper via HTTP and verify every persisted answer after submission.
             runPhase(executor, count, 0, i -> {
@@ -177,7 +178,7 @@ class ExamHttpLoadTest {
             // The real scheduled bean must drain the backlog through its bounded, independent transactions.
             // Use the application's Instant mapping; raw JDBC Timestamp otherwise shifts MySQL DATETIME by the JVM time zone.
             tx.executeWithoutResult(status -> entityManager.createQuery("update ExamAttempt a set a.status=:state,a.deadline=:deadline,a.submittedAt=null,a.score=null,a.passed=null where a.exam.id=:exam")
-                    .setParameter("state",AttemptStatus.IN_PROGRESS).setParameter("deadline",java.time.Instant.now().minusSeconds(1)).setParameter("exam",examId).executeUpdate());
+                    .setParameter("state",AttemptStatus.IN_PROGRESS).setParameter("deadline",java.time.Instant.now().minusSeconds(15)).setParameter("exam",examId).executeUpdate());
             long expiryBegin = System.nanoTime();
             org.awaitility.Awaitility.await().atMost(Duration.ofSeconds(120)).pollInterval(Duration.ofMillis(500))
                     .until(() -> jdbc.queryForObject("select count(*) from exam_attempt where exam_id=? and status='GRADED'", Long.class, examId) == count);
@@ -211,7 +212,7 @@ class ExamHttpLoadTest {
         Map<Long, String> answers = new LinkedHashMap<>();
         for (int i = 0; i < items.size(); i++) answers.put(items.get(i).questionId(),
                 (user % 2 == 0) != (finalAnswer && i == 0) ? "A" : "B");
-        return json.writeValueAsString(new ExamDtos.SubmitRequest(answers, 0));
+        return json.writeValueAsString(new ExamDtos.SubmitRequest(answers, 0, finalAnswer ? 1L : 0L, UUID.randomUUID().toString()));
     }
 
     JsonNode request(String phase, String method, String path, String token, String body) throws Exception {

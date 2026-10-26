@@ -25,6 +25,10 @@ public class FillBlankReviewController {
         service.revoke(id,decisionId,request.reopenPublished(),jwt.getSubject());
         return java.util.Map.of("status","ok");
     }
+    @PostMapping("/{id}/blank-review/partial-decisions")
+    public Count decidePartial(@PathVariable Long id,@RequestBody FillBlankReviewService.PartialRequest request,@AuthenticationPrincipal Jwt jwt) {
+        return new Count(service.decidePartial(id,request,jwt.getSubject()));
+    }
     @PostMapping("/{id}/blank-review/publish")
     public Count publish(@PathVariable Long id,@RequestBody Publish request,@AuthenticationPrincipal Jwt jwt) {
         return new Count(service.publish(id,jwt.getSubject(),request.expectedCount()));

@@ -22,6 +22,8 @@
 
 ## 本地启动
 
+当前正式站点已部署到 `https://hqhexam.cn`。本服务器使用宝塔 Nginx、MySQL、Redis 和 systemd，配置及运维说明见 [宝塔部署说明](deploy/baota/README.md)。线上新数据以服务器数据库为准；不要用本机旧快照覆盖后续线上记录。
+
 首次运行先执行 `init-local-infrastructure.ps1`。它会启动 Docker、生成仅供本机使用的 Redis/JWT 随机密钥，并启动持久化 Redis 7；密钥保存在已被忽略的 `.env.local`，不会进入代码库。
 
 之后最简单的方式是在 IDEA 顶部选择“本地完整系统”运行配置并点击运行。也可以双击 `start-local.ps1`，脚本会自动确认 Redis 已就绪，再启动前后端并检查状态。

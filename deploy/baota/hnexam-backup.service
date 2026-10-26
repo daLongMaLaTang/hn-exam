@@ -1,0 +1,7 @@
+[Unit]
+Description=Back up Huaneng examination database
+After=mysqld.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/hnexam/bin/backup.sh

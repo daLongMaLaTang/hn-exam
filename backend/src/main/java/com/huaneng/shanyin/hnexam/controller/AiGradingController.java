@@ -45,5 +45,5 @@ public class AiGradingController {
         var c=provider.config(); c.setEnabled(false); settings.save(c); return get();
     }
     @PostMapping("/api/exams/attempts/{id}/ai/{questionId}")
-    public Map<String,String> suggest(@PathVariable Long id,@PathVariable Long questionId) { return grading.suggest(id,questionId); }
+    public Map<String,String> suggest(@PathVariable Long id,@PathVariable Long questionId,java.security.Principal p) { return grading.suggest(id,questionId,p.getName()); }
 }

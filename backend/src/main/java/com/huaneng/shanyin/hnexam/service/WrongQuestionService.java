@@ -27,9 +27,19 @@ public class WrongQuestionService {
         });
         attempts.findByUserIdOrderByStartedAtDesc(userId).stream().filter(a -> a.getStatus() == AttemptStatus.GRADED && a.getExam().getStatus() != ExamStatus.CANCELLED).forEach(a -> a.getAnswers().forEach(r -> {
             QuestionType type = a.getPersonalPaper() == null ? a.getExam().getQuestions().stream().filter(q -> q.getQuestion().getId().equals(r.getQuestion().getId())).map(q -> q.getSnapshotType() == null ? q.getQuestion().getType() : q.getSnapshotType()).findFirst().orElse(r.getQuestion().getType()) : a.getPersonalPaper().getQuestions().stream().filter(q -> q.getQuestion().getId().equals(r.getQuestion().getId())).map(PersonalExamQuestion::getSnapshotType).findFirst().orElse(r.getQuestion().getType());
-            // Legacy short answers without a reviewed semantic percentage remain unclassified.
-            if (type == QuestionType.SHORT_ANSWER && r.getSemanticSimilarity() == null) return;
-            boolean correct = type == QuestionType.SHORT_ANSWER ? r.getSemanticSimilarity() >= 30 : Boolean.TRUE.equals(r.getCorrect());
+            boolean correct;
+            if(type==QuestionType.SHORT_ANSWER && ShortAnswerScoring.POLICY.equals(r.getShortScoringPolicyVersion())) {
+                if(r.getAwardedPoints()==null || !"ACCEPTED".equals(r.getShortReviewState())) return;
+                Integer maximum=a.getPersonalPaper()==null
+                    ?a.getExam().getQuestions().stream().filter(q->q.getQuestion().getId().equals(r.getQuestion().getId())).map(ExamQuestion::getPoints).findFirst().orElse(null)
+                    :a.getPersonalPaper().getQuestions().stream().filter(q->q.getQuestion().getId().equals(r.getQuestion().getId())).map(PersonalExamQuestion::getPoints).findFirst().orElse(null);
+                if(maximum==null || maximum<=0 || r.getAwardedPoints()<0 || r.getAwardedPoints()>maximum) return;
+                correct=ShortAnswerScoring.correctByScore(r.getAwardedPoints(),maximum);
+            } else {
+                // Null policy retains the historical semantic rule and replay order.
+                if(type==QuestionType.SHORT_ANSWER && r.getSemanticSimilarity()==null) return;
+                correct=type==QuestionType.SHORT_ANSWER?r.getSemanticSimilarity()>=30:Boolean.TRUE.equals(r.getCorrect());
+            }
             facts.add(new Fact(r.getQuestion(), "EXAM", a.getId(), a.getSubmittedAt(), !correct, correct && a.getExam().isWrongQuestionPaper()));
         }));
         facts.sort(Comparator.comparing(Fact::at).thenComparing(Fact::source).thenComparing(Fact::id));

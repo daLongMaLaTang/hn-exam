@@ -27,15 +27,20 @@ public class FillBlankReviewService {
     private static final ObjectMapper JSON = new ObjectMapper();
 
     public record Item(Long questionId, String stem, String reference, int points) {}
+    public record SlotView(int slot, String submitted, Boolean correct) {}
+    public record ScorePreview(int maximum, int totalBlanks, int correctOutside, int pendingOutside) {}
     public record Group(Long questionId, String version, int slot, String stem, String reference,
-                        String submitted, int count, List<Long> answerIds) {}
+                        String submitted, int count, List<Long> answerIds, String slotLabel, int slotEnd,
+                        List<SlotView> slots, List<ScorePreview> scorePreviews) {}
     public record DecisionRequest(Long questionId, String version, int slot, String submitted,
                                   boolean correct, boolean remember, List<Long> answerIds) {}
+    public record PartialRequest(Long questionId, String version, int slot, String submitted,
+                                 List<Long> answerIds, List<SlotView> expectedSlots, Map<Integer, Boolean> verdicts) {}
     public record History(Long id, String stem, int slot, String submitted, boolean correct,
-                          int count, Long ruleId, String actor, Instant at, Instant revokedAt) {}
+                          int count, Long ruleId, String actor, Instant at, Instant revokedAt, String slotLabel) {}
     public record Usage(Long attemptId, Long examId, String examTitle, boolean published) {}
     public record RuleView(Long id, String stem, int slot, String acceptedAnswer, boolean active,
-                           String actor, Instant at, List<Usage> usages) {}
+                           String actor, Instant at, List<Usage> usages, String slotLabel) {}
     public record Workspace(List<Group> groups, int pendingSlots, int readyCount,
                             List<History> history, List<RuleView> rules) {}
 
@@ -45,7 +50,9 @@ public class FillBlankReviewService {
     }
     public static String version(Item item) {
         // Includes exact stem/reference and grading algorithm version. Never follows a changed live question.
-        return hash("exam-blank-v1\0" + item.stem() + "\0" + item.reference());
+        String algorithm = ConsecutiveBlankOrder.blocks(item.stem(), referenceParts(item.reference()).size()).isEmpty()
+                ? "exam-blank-v1" : "exam-blank-consecutive-v2";
+        return hash(algorithm + "\0" + item.stem() + "\0" + item.reference());
     }
     public static List<String> referenceParts(String value) {
         if (value == null || value.isBlank()) return List.of();
@@ -70,30 +77,61 @@ public class FillBlankReviewService {
         return referenceParts(value);
     }
 
+    private static final String SET_PREFIX = "连续空:";
+    private static String answerSet(List<String> values) {
+        try { return SET_PREFIX + JSON.writeValueAsString(values.stream().sorted().toList()); }
+        catch (Exception e) { throw new IllegalStateException("整理连续空答案失败", e); }
+    }
+    private static String storedSlotLabel(int slot, String submitted) {
+        if (submitted != null && submitted.startsWith(SET_PREFIX)) {
+            try { return "第 " + slot + "–" + (slot + JSON.readTree(submitted.substring(SET_PREFIX.length())).size() - 1) + " 空（顺序不限）"; }
+            catch (Exception ignored) { /* old single-slot expression */ }
+        }
+        return "第 " + slot + " 空";
+    }
+
     /** Caller holds the attempt lock; only initialize new/unpublished scores. */
     public void initialize(Item item, AttemptAnswer answer) {
-        if (!answer.getBlankMarks().isEmpty()) return;
+        if (!answer.getBlankMarks().isEmpty()) {
+            // Upgrade only unfinished, automatic legacy marks. Never overwrite a human/rule decision.
+            if (answer.getBlankMarks().stream().noneMatch(m -> m.getCorrect() == null)
+                    || answer.getBlankMarks().stream().anyMatch(m -> m.getDecisionId() != null || m.getRuleId() != null)
+                    || answer.getBlankMarks().stream().allMatch(m -> version(item).equals(m.getQuestionVersion()))) return;
+        }
         var reference = referenceParts(item.reference());
         if (reference.isEmpty()) throw new IllegalStateException("填空题缺少参考答案，请核对题库");
         var submitted = submittedParts(answer.getAnswerText());
         var known = rules.findByQuestionIdAndQuestionVersionAndActiveTrue(item.questionId(), version(item));
         boolean extra = submitted.size() > reference.size()
                 && submitted.subList(reference.size(), submitted.size()).stream().anyMatch(s -> !s.isEmpty());
+        var aligned = ConsecutiveBlankOrder.align(item.stem(), reference.size(), submitted, (slot, text) ->
+                Arrays.stream(reference.get(slot).split("~", -1)).map(String::strip).anyMatch(text::equals)
+                        || known.stream().anyMatch(r -> r.getSlot() == slot + 1 && r.getAcceptedAnswer().equals(text)));
         for (int i=0; i<reference.size(); i++) {
-            var mark = new FillBlankMark(); mark.setAnswer(answer); mark.setSlot(i+1);
+            int position = i + 1;
+            var mark = answer.getBlankMarks().stream().filter(m -> m.getSlot() == position).findFirst().orElse(null);
+            if (mark == null) { mark = new FillBlankMark(); mark.setAnswer(answer); mark.setSlot(position); answer.getBlankMarks().add(mark); }
+            mark.setCorrect(null); mark.setRuleId(null); mark.setDecisionId(null);
             mark.setQuestionVersion(version(item));
-            String text = i < submitted.size() ? submitted.get(i) : ""; mark.setSubmitted(text);
+            String text = aligned.get(i); mark.setSubmitted(text);
             mark.setSource("PENDING");
             if (extra || text.isEmpty()) { mark.setCorrect(false); mark.setSource(extra ? "EXTRA" : "EMPTY"); }
             else if (Arrays.stream(reference.get(i).split("~",-1)).map(String::strip).anyMatch(text::equals)) {
                 mark.setCorrect(true); mark.setSource("STANDARD");
             } else {
                 int slot=i+1;
-                known.stream().filter(r -> r.getSlot()==slot && r.getAcceptedAnswer().equals(text)).findFirst().ifPresent(r -> {
-                    mark.setCorrect(true); mark.setSource("RULE"); mark.setRuleId(r.getId());
-                });
+                var rule = known.stream().filter(r -> r.getSlot()==slot && r.getAcceptedAnswer().equals(text)).findFirst().orElse(null);
+                if (rule != null) { mark.setCorrect(true); mark.setSource("RULE"); mark.setRuleId(rule.getId()); }
             }
-            answer.getBlankMarks().add(mark);
+        }
+        if (!extra) {
+            for (var block : ConsecutiveBlankOrder.blocks(item.stem(), reference.size())) {
+                String set = answerSet(aligned.subList(block.start(), block.end()));
+                var rule = known.stream().filter(r -> r.getSlot() == block.start() + 1 && r.getAcceptedAnswer().equals(set)).findFirst().orElse(null);
+                if (rule != null) answer.getBlankMarks().stream()
+                        .filter(m -> m.getSlot() > block.start() && m.getSlot() <= block.end() && m.getCorrect() == null)
+                        .forEach(m -> { m.setCorrect(true); m.setSource("RULE"); m.setRuleId(rule.getId()); });
+            }
         }
         recompute(item, answer);
     }
@@ -139,33 +177,54 @@ public class FillBlankReviewService {
             if(entry.getStatus()!=AttemptStatus.SUBMITTED) continue;
             var a=lockAttempt(entry.getId());
             if(a.getStatus()!=AttemptStatus.SUBMITTED) continue;
+            for(var shortItem:ShortAnswerReviewService.items(a)) {
+                var shortValue=a.getAnswers().stream().filter(v -> v.getQuestion().getId().equals(shortItem.questionId())).findFirst().orElse(null);
+                if(shortValue!=null) ShortAnswerReviewService.initializeEmpty(shortValue);
+            }
             for(var item:items(a)) {
                 if(a.getAnswers().stream().noneMatch(v -> v.getQuestion().getId().equals(item.questionId()))) {
                     var missing=new AttemptAnswer();missing.setAttempt(a);missing.setQuestion(em.getReference(Question.class,item.questionId()));a.getAnswers().add(missing);
                 }
                 var value=answer(a,item.questionId());
-                if(value.getBlankMarks().isEmpty() && value.getGradingMethod()!=GradingMethod.MANUAL) initialize(item,value);
+                if(value.getGradingMethod()!=GradingMethod.MANUAL) initialize(item,value);
             }
         }
         em.flush(); return all;
     }
     private List<Group> groups(List<ExamAttempt> all) {
         Map<String,List<Long>> ids=new LinkedHashMap<>(); Map<String,Group> templates=new LinkedHashMap<>();
+        Map<String,Set<ScorePreview>> previews=new LinkedHashMap<>();
         for(var a:all) {
             if(a.getStatus()!=AttemptStatus.SUBMITTED) continue;
             for(var item:items(a)) {
                 var value=answer(a,item.questionId());
+                var refs=referenceParts(item.reference());
+                var blocks=ConsecutiveBlankOrder.blocks(item.stem(),refs.size());
+                var seen=new HashSet<Integer>();
                 for(var m:value.getBlankMarks()) {
                     if(m.getCorrect()!=null) continue;
-                    String key=item.questionId()+":"+m.getQuestionVersion()+":"+m.getSlot()+":"+hash(m.getSubmitted());
+                    var block=blocks.stream().filter(x -> m.getSlot()>x.start() && m.getSlot()<=x.end()
+                            && version(item).equals(m.getQuestionVersion())).findFirst().orElse(null);
+                    int start=block==null?m.getSlot():block.start()+1, end=block==null?m.getSlot():block.end();
+                    if(!seen.add(start)) continue;
+                    String submitted=block==null?m.getSubmitted():answerSet(value.getBlankMarks().stream()
+                            .filter(x -> x.getSlot()>=start && x.getSlot()<=end).map(FillBlankMark::getSubmitted).toList());
+                    var slots=value.getBlankMarks().stream().filter(x -> x.getSlot()>=start && x.getSlot()<=end)
+                            .sorted(Comparator.comparingInt(FillBlankMark::getSlot))
+                            .map(x -> new SlotView(x.getSlot(),x.getSubmitted(),x.getCorrect())).toList();
+                    String key=item.questionId()+":"+m.getQuestionVersion()+":"+start+":"+hash(submitted)+":"+slots;
                     ids.computeIfAbsent(key,k -> new ArrayList<>()).add(value.getId());
-                    templates.putIfAbsent(key,new Group(item.questionId(),m.getQuestionVersion(),m.getSlot(),item.stem(),
-                            referenceParts(item.reference()).get(m.getSlot()-1),m.getSubmitted(),0,List.of()));
+                    var outside=value.getBlankMarks().stream().filter(x -> x.getSlot()<start || x.getSlot()>end).toList();
+                    previews.computeIfAbsent(key,k -> new LinkedHashSet<>()).add(new ScorePreview(item.points(),refs.size(),
+                            (int)outside.stream().filter(x -> Boolean.TRUE.equals(x.getCorrect())).count(),
+                            (int)outside.stream().filter(x -> x.getCorrect()==null).count()));
+                    templates.putIfAbsent(key,new Group(item.questionId(),m.getQuestionVersion(),start,item.stem(),
+                            String.join("；",refs.subList(start-1,end)),submitted,0,List.of(),storedSlotLabel(start,submitted),end,slots,List.of()));
                 }
             }
         }
         return ids.entrySet().stream().map(e -> {var t=templates.get(e.getKey());
-            return new Group(t.questionId(),t.version(),t.slot(),t.stem(),t.reference(),t.submitted(),e.getValue().size(),e.getValue().stream().sorted().toList());
+            return new Group(t.questionId(),t.version(),t.slot(),t.stem(),t.reference(),t.submitted(),e.getValue().size(),e.getValue().stream().sorted().toList(),t.slotLabel(),t.slotEnd(),t.slots(),List.copyOf(previews.get(e.getKey())));
         }).sorted(Comparator.comparing(Group::questionId).thenComparing(Group::slot).thenComparing(Comparator.comparingInt(Group::count).reversed())).toList();
     }
 
@@ -174,10 +233,11 @@ public class FillBlankReviewService {
         lockExam(examId); var all=prepare(examId); var groups=groups(all);
         var questionIds=new HashSet<Long>();
         all.forEach(a -> items(a).forEach(i -> questionIds.add(i.questionId())));
-        var history=decisions.findByExamIdOrderByIdDesc(examId).stream().map(d -> new History(d.getId(),d.getStem(),d.getSlot(),d.getSubmitted(),d.isCorrect(),d.getAffectedCount(),d.getRuleId(),d.getActor(),d.getCreatedAt(),d.getRevokedAt())).toList();
-        var ruleViews=rules.findByQuestionIdInOrderByIdDesc(questionIds).stream().map(r -> new RuleView(r.getId(),r.getStem(),r.getSlot(),r.getAcceptedAnswer(),r.isActive(),r.getCreatedBy(),r.getCreatedAt(),usages(r.getId()))).toList();
+        var history=decisions.findByExamIdOrderByIdDesc(examId).stream().map(d -> new History(d.getId(),d.getStem(),d.getSlot(),d.getSubmitted(),d.isCorrect(),d.getAffectedCount(),d.getRuleId(),d.getActor(),d.getCreatedAt(),d.getRevokedAt(),storedSlotLabel(d.getSlot(),d.getSubmitted()))).toList();
+        var ruleViews=rules.findByQuestionIdInOrderByIdDesc(questionIds).stream().map(r -> new RuleView(r.getId(),r.getStem(),r.getSlot(),r.getAcceptedAnswer(),r.isActive(),r.getCreatedBy(),r.getCreatedAt(),usages(r.getId()),storedSlotLabel(r.getSlot(),r.getAcceptedAnswer()))).toList();
         int ready=(int)all.stream().filter(a -> a.getStatus()==AttemptStatus.SUBMITTED && (!items(a).isEmpty() || ShortAnswerReviewService.centrallyGraded(a)) && ready(a)).count();
-        return new Workspace(groups,groups.stream().mapToInt(Group::count).sum(),ready,history,ruleViews);
+        int pending=(int)all.stream().filter(a -> a.getStatus()==AttemptStatus.SUBMITTED).flatMap(a -> a.getAnswers().stream()).flatMap(v -> v.getBlankMarks().stream()).filter(m -> m.getCorrect()==null).count();
+        return new Workspace(groups,pending,ready,history,ruleViews);
     }
     private List<Usage> usages(Long ruleId) {
         return marks.findByRuleId(ruleId).stream().map(m -> m.getAnswer().getAttempt()).distinct()
@@ -190,8 +250,11 @@ public class FillBlankReviewService {
                 || request.slot()<1 || request.answerIds()==null || request.answerIds().isEmpty() || request.answerIds().size()>10000
                 || request.submitted().length()>10000 || (!request.correct() && request.remember())) throw new IllegalArgumentException("判定参数不正确");
         lockExam(examId); var all=prepare(examId);
-        var group=groups(all).stream().filter(g -> g.questionId().equals(request.questionId()) && g.version().equals(request.version())
-                && g.slot()==request.slot() && g.submitted().equals(request.submitted())).findFirst().orElseThrow(() -> new IllegalStateException("该答案组已处理，请刷新"));
+        var matching=groups(all).stream().filter(g -> g.questionId().equals(request.questionId()) && g.version().equals(request.version())
+                && g.slot()==request.slot() && g.submitted().equals(request.submitted())).toList();
+        if(matching.isEmpty()) throw new IllegalStateException("该答案组已处理，请刷新");
+        var group=matching.stream().filter(g -> new TreeSet<>(g.answerIds()).equals(new TreeSet<>(request.answerIds())))
+                .findFirst().orElseThrow(() -> new IllegalStateException("答案组人数已变化，请刷新后重新确认"));
         if(!new TreeSet<>(group.answerIds()).equals(new TreeSet<>(request.answerIds()))) throw new IllegalStateException("答案组人数已变化，请刷新后重新确认");
         var d=new FillBlankDecision(); d.setExamId(examId);d.setQuestionId(group.questionId());d.setQuestionVersion(group.version());d.setSlot(group.slot());
         d.setStem(group.stem());d.setSubmitted(group.submitted());d.setCorrect(request.correct());d.setAffectedCount(group.count());d.setActor(privateAdmins.actorLabel(actor));d.setCreatedAt(Instant.now());d.setTargetAnswerIds(group.answerIds().toString());
@@ -208,9 +271,49 @@ public class FillBlankReviewService {
           if(a.getStatus()!=AttemptStatus.SUBMITTED) continue;
           for(var item:items(a)) {
             var v=answer(a,item.questionId()); if(!targets.contains(v.getId())) continue;
-            var m=v.getBlankMarks().stream().filter(x -> x.getSlot()==group.slot()).findFirst().orElseThrow();
-            m.setCorrect(request.correct());m.setDecisionId(d.getId());m.setRuleId(d.getRuleId());m.setSource("MANUAL");recompute(item,v);
+            v.getBlankMarks().stream().filter(m -> m.getSlot()>=group.slot() && m.getSlot()<=group.slotEnd() && m.getCorrect()==null)
+                    .forEach(m -> {m.setCorrect(request.correct());m.setDecisionId(d.getId());m.setRuleId(d.getRuleId());m.setSource("MANUAL");});
+            recompute(item,v);
           }
+        }
+        return group.count();
+    }
+
+    /** Each pending slot gets its own existing audit record; the whole selection commits atomically. */
+    @Transactional
+    public int decidePartial(Long examId, PartialRequest request, String actor) {
+        if(request==null || request.questionId()==null || request.version()==null || request.submitted()==null
+                || request.slot()<1 || request.answerIds()==null || request.answerIds().isEmpty() || request.answerIds().size()>10000
+                || request.answerIds().stream().anyMatch(Objects::isNull) || request.submitted().length()>10000
+                || request.expectedSlots()==null || request.verdicts()==null || request.verdicts().values().stream().anyMatch(Objects::isNull))
+            throw new IllegalArgumentException("请逐个确认待判答案是否正确");
+        lockExam(examId); var all=prepare(examId);
+        var group=groups(all).stream().filter(g -> g.questionId().equals(request.questionId()) && g.version().equals(request.version())
+                && g.slot()==request.slot() && g.submitted().equals(request.submitted())
+                && new TreeSet<>(g.answerIds()).equals(new TreeSet<>(request.answerIds()))
+                && g.slots().equals(request.expectedSlots())).findFirst()
+                .orElseThrow(() -> new IllegalStateException("答案组人数或判定状态已变化，请刷新后重新确认"));
+        var pending=group.slots().stream().filter(s -> s.correct()==null).toList();
+        if(group.slotEnd()==group.slot() || !request.verdicts().keySet().equals(pending.stream().map(SlotView::slot).collect(Collectors.toSet())))
+            throw new IllegalArgumentException("请只对本组全部待判答案逐个给出判定，已判定的空保持不变");
+        Map<Integer,Long> decisionIds=new HashMap<>();
+        for(var slot:pending) {
+            var d=new FillBlankDecision();d.setExamId(examId);d.setQuestionId(group.questionId());d.setQuestionVersion(group.version());
+            d.setSlot(slot.slot());d.setStem(group.stem());d.setSubmitted(slot.submitted());d.setCorrect(request.verdicts().get(slot.slot()));
+            d.setAffectedCount(group.count());d.setActor(privateAdmins.actorLabel(actor));d.setCreatedAt(Instant.now());
+            d.setTargetAnswerIds(group.answerIds().toString());decisions.saveAndFlush(d);decisionIds.put(slot.slot(),d.getId());
+        }
+        var targets=new HashSet<>(group.answerIds());
+        for(var a:all) {
+            if(a.getStatus()!=AttemptStatus.SUBMITTED) continue;
+            for(var item:items(a)) {
+                var v=answer(a,item.questionId());if(!targets.contains(v.getId())) continue;
+                v.getBlankMarks().stream().filter(m -> decisionIds.containsKey(m.getSlot())).forEach(m -> {
+                    m.setCorrect(request.verdicts().get(m.getSlot()));m.setDecisionId(decisionIds.get(m.getSlot()));
+                    m.setRuleId(null);m.setSource("MANUAL");
+                });
+                recompute(item,v);
+            }
         }
         return group.count();
     }

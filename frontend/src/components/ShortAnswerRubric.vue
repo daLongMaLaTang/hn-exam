@@ -2,7 +2,7 @@
 import { computed, nextTick, onMounted, ref } from 'vue'
 import { api } from '../api'
 type Point = { key:string; label:string; source:string; weight:number; kind:string; constraint:string; partialAllowed:boolean; critical:boolean }
-type Rubric = { points:Point[]; guidance:string }
+type Rubric = { points:Point[]; guidance:string; formatVersion?:number; policyVersion?:string; issues?:string[] }
 type View = { questionId:number; stem:string; reference:string; version:string; id:number|null; status:string; rubric:Rubric; confirmedBy:string|null }
 const props=defineProps<{questionId:number}>(), emit=defineEmits<{close:[]}>()
 const data=ref<View|null>(null), form=ref<Rubric>({points:[],guidance:''}), busy=ref(false), error=ref(''), notice=ref(''), saved=ref(''), intent=ref(''), root=ref<HTMLElement|null>(null)
@@ -15,7 +15,7 @@ async function act(action:string){
   if(!data.value)return;busy.value=true;error.value='';notice.value='';intent.value=''
   try{
     const endpoint=`/api/questions/${props.questionId}/rubric`+(action==='save'?'':`/${action}`)
-    assign(await api<View>(endpoint,{method:action==='save'?'PUT':'POST',body:JSON.stringify({version:data.value.version,expectedId:data.value.id,...(action==='save'?{rubric:form.value}:{})})}))
+    assign(await api<View>(endpoint,{method:action==='save'?'PUT':'POST',body:JSON.stringify({version:data.value.version,expectedId:data.value.id,...(action==='save'?{rubric:{...form.value,formatVersion:2,policyVersion:"SHORT_ATOMIC_V2",issues:[],points:form.value.points.map(p=>({...p,partialAllowed:false}))}}:{})})}))
     notice.value=action==='confirm'?'评分标准已确认，可用于相同版本题目的AI逐点评分。':action==='generate'?'AI草稿已保存，请核对每个要点和原文依据，再确认使用。':'草稿已保存，确认后才能用于新评分。'
   }catch(e){error.value=e instanceof Error?e.message:'操作失败，请重试'}finally{busy.value=false}
 }
@@ -25,7 +25,7 @@ onMounted(async()=>{await load();await nextTick();root.value?.scrollIntoView({be
 
 <template>
   <section ref="root" class="panel rubric-editor" aria-label="简答评分标准" :aria-busy="busy">
-    <header><div><h2>简答评分标准</h2><p>先确认原文和评分点，同一版本的题目可以重复使用。</p></div><button class="secondary-button" :disabled="busy" @click="close">收起评分标准</button></header>
+    <header><div><h2>简答评分标准 · 高级</h2><p>发布考试后自动准备。需要修订评分点时在此操作，已锁定的试卷标准保留。</p></div><button class="secondary-button" :disabled="busy" @click="close">收起评分标准</button></header>
     <div v-if="error" class="notice error" role="alert">{{error}} <button :disabled="busy||dirty" class="link-button" @click="load">重新加载</button></div>
     <div v-if="notice" class="notice" role="status">{{notice}}</div>
     <p v-if="busy" role="status">正在处理，请稍候…</p>
@@ -35,7 +35,7 @@ onMounted(async()=>{await load();await nextTick();root.value?.scrollIntoView({be
       <div class="actions"><button class="secondary-button" :disabled="busy" @click="intent='generate'">用 AI 整理评分点</button><button class="secondary-button" :disabled="busy||form.points.length>=40" @click="add">手工添加评分点</button><span>共 {{form.points.length}} 个评分点 · 总权重 {{total}}</span></div>
       <div v-if="intent" class="confirm" role="region" aria-label="确认评分标准操作">
         <p v-if="intent==='generate'">将题干和参考答案发送给已配置的 AI 服务生成新草稿，{{dirty?'未保存的编辑会被替换，':''}}生成结果仍需你核对后确认。</p>
-        <p v-else-if="intent==='confirm'">确认评分点完整、原文依据准确，并已核对数值、条件、顺序及部分分规则。确认后可用于判卷；后续修改会保存为新版本。</p>
+        <p v-else-if="intent==='confirm'">确认评分点完整、原文依据准确，并已核对数值、条件、顺序及原子评分点。确认后可用于判卷；后续修改会保存为新版本。</p>
         <p v-else>尚有未保存修改，收起后这些修改不会保留。</p>
         <button class="primary-button" :disabled="busy" @click="intent==='close'?emit('close'):act(intent)">{{intent==='generate'?'确认生成草稿':intent==='confirm'?'确认评分标准':'放弃修改并收起'}}</button><button class="secondary-button" :disabled="busy" @click="intent=''">取消</button>
       </div>
@@ -45,10 +45,10 @@ onMounted(async()=>{await load();await nextTick();root.value?.scrollIntoView({be
         <div class="point-top"><label>评分点内容<textarea v-model="p.label" rows="2" maxlength="500" /></label><label>权重<input v-model.number="p.weight" type="number" min="1" max="100" step="1" /></label><label>判断类型<select v-model="p.kind"><option v-for="(name,key) in kinds" :key="key" :value="key">{{name}}</option></select></label></div>
         <label>原文依据<textarea v-model="p.source" rows="2" placeholder="复制参考答案中的连续原文，不能改写" /></label>
         <label>具体判分要求<textarea v-model="p.constraint" rows="2" maxlength="1000" placeholder="说明必须包含的条件、数字、顺序，或可接受的等价表达" /></label>
-        <div class="point-options"><label><input v-model="p.partialAllowed" type="checkbox" />允许部分满足时给本点一半分</label><label><input v-model="p.critical" type="checkbox" />关键要求，未完全满足时必须复核</label><button type="button" class="link-button remove" @click="form.points.splice(index,1)">移除此点</button></div>
+        <div class="point-options"><label><input v-model="p.critical" type="checkbox" />安全关键要求</label><button type="button" class="link-button remove" @click="form.points.splice(index,1)">移除此点</button></div>
       </fieldset>
       <label class="guidance">整体评分说明<textarea v-model="form.guidance" :disabled="busy" rows="3" maxlength="3000" placeholder="说明必答范围、择一关系、重复内容及需要重点核对的事项" /></label>
-      <p class="help">权重按试卷本题满分等比例换算，总分四舍五入。数值、顺序、条件类答案默认进入单独复核。新建草稿后，先确认标准才能生成新评分；已经确认的作答保留原评分记录。</p>
+      <p class="help">每点表达一个可独立判断的要求；部分分通过预先拆点实现。按权重累计后统一四舍五入。只有无法判断的作答需要复核；新标准不改变已锁定试卷。</p>
       <footer><button class="secondary-button" :disabled="busy||!form.points.length||!dirty" @click="act('save')">保存草稿</button><button class="primary-button" :disabled="busy||dirty||data.status!=='DRAFT'" @click="intent='confirm'">核对完成，确认使用</button></footer>
     </template>
   </section>

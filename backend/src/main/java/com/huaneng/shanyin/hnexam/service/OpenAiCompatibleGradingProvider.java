@@ -31,6 +31,12 @@ public class OpenAiCompatibleGradingProvider implements SubjectiveGradingProvide
                 (content,model)->parseSuggestion(content,r.maximumPoints(),model));
     }
     public record Structured(JsonNode value,String model) {}
+    /** Effective routing only: never include or return a credential in cache identities. */
+    public String shortConfigurationFingerprint() {
+        var c=config();boolean saved=c.getApiKeyCiphertext()!=null;
+        return FillBlankReviewService.hash("short-provider-v3-lenient-suggestion\0"+(saved?DeepSeekConnection.ENDPOINT:c.getEndpoint())
+                +"\0"+(saved?DeepSeekConnection.MODEL:c.getModel())+"\0"+usage.maxOutputTokens()+"\0thinking-disabled="+saved);
+    }
     @Transactional(propagation=Propagation.NEVER)
     public Structured structured(String system,Object data,Long userId) {
         String serialized;

@@ -59,6 +59,15 @@ public class ExamAttempt {
     @Column(nullable = false)
     private int focusLossCount;
 
+    @Column(nullable = false)
+    private long answerRevision;
+
+    @Column(length = 64)
+    private String lastAnswerRequestId;
+
+    @Column(length = 64)
+    private String lastAnswerRequestHash;
+
     @OneToMany(mappedBy = "attempt", cascade = CascadeType.ALL, orphanRemoval = true)
     private List<AttemptAnswer> answers = new ArrayList<>();
 }

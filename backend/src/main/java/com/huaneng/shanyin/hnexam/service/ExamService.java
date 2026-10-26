@@ -29,6 +29,9 @@ public class ExamService {
     private final AnswerGrader answerGrader;
     private final FillBlankReviewService blankReview;
     private final WrongQuestionService wrongQuestions;
+    private final ShortAnswerAutomationService shortAutomation;
+    @org.springframework.beans.factory.annotation.Value("${app.exams.submission-grace-seconds:10}")
+    private int submissionGraceSeconds;
     @PersistenceContext private EntityManager entityManager;
 
     @Transactional(readOnly = true)
@@ -101,7 +104,10 @@ public class ExamService {
     }
 
     @Transactional
-    public ExamDtos.Summary publish(Long id) {
+    public ExamDtos.Summary publish(Long id) { return publish(id,null); }
+
+    @Transactional
+    public ExamDtos.Summary publish(Long id,String actor) {
         Exam exam = lockExam(id);
         if (exam.getStatus() != ExamStatus.DRAFT) throw new IllegalStateException("只能发布草稿考试");
         if (!exam.isWrongQuestionPaper() && exam.getQuestions().isEmpty()) throw new IllegalStateException("试卷至少需要一道题");
@@ -110,6 +116,7 @@ public class ExamService {
         if (exam.isWrongQuestionPaper()) generatePersonalPapers(exam);
         else for (ExamQuestion item : exam.getQuestions()) { ensureEligible(item.getQuestion()); item.captureSnapshot(); }
         exam.setStatus(ExamStatus.PUBLISHED);
+        shortAutomation.prepareOnPublish(id,actor);
         return ExamDtos.Summary.from(exam);
     }
 
@@ -181,25 +188,80 @@ public class ExamService {
 
     @Transactional
     public ExamDtos.SaveAck saveAnswers(Long attemptId, String employeeNo, ExamDtos.SubmitRequest request) {
+        return saveAnswers(attemptId, employeeNo, request, Instant.now());
+    }
+
+    @Transactional
+    public ExamDtos.SaveAck saveAnswers(Long attemptId, String employeeNo, ExamDtos.SubmitRequest request, Instant receivedAt) {
         ExamAttempt attempt = ownedAttempt(attemptId, employeeNo);
-        expireIfDue(attempt);
-        if (attempt.getStatus() == AttemptStatus.IN_PROGRESS) {
-            applyAnswers(attempt, request);
-            if (attempt.getExam().isBasicAntiCheat() && attempt.getFocusLossCount() >= 2) grade(attempt, Instant.now());
-        }
-        return new ExamDtos.SaveAck(attempt.getStatus(), Instant.now(), attempt.getFocusLossCount());
+        boolean accepted = writeAnswers(attempt, request, false, receivedAt);
+        return new ExamDtos.SaveAck(attempt.getStatus(), Instant.now(), attempt.getFocusLossCount(), attempt.getAnswerRevision(), accepted);
     }
 
     @Transactional
     public ExamDtos.GradeView submit(Long attemptId, String employeeNo, ExamDtos.SubmitRequest request) {
-        ExamAttempt attempt = ownedAttempt(attemptId, employeeNo);
-        expireIfDue(attempt);
-        if (attempt.getStatus() == AttemptStatus.IN_PROGRESS) {
-            applyAnswers(attempt, request);
-            grade(attempt, Instant.now());
-        }
-        return ExamDtos.GradeView.from(attempt);
+        return submitAcknowledged(attemptId, employeeNo, request, Instant.now()).grade();
     }
+
+    @Transactional
+    public ExamDtos.SubmissionAck submitAcknowledged(Long attemptId, String employeeNo, ExamDtos.SubmitRequest request, Instant receivedAt) {
+        ExamAttempt attempt = ownedAttempt(attemptId, employeeNo);
+        boolean accepted = writeAnswers(attempt, request, true, receivedAt);
+        return new ExamDtos.SubmissionAck(attempt.getStatus(), Instant.now(), attempt.getFocusLossCount(),
+                attempt.getAnswerRevision(), accepted, ExamDtos.GradeView.from(attempt));
+    }
+
+    private boolean writeAnswers(ExamAttempt attempt, ExamDtos.SubmitRequest request, boolean submit, Instant receivedAt) {
+        if (request.expectedRevision() == null || request.expectedRevision() < 0 || request.requestId() == null
+                || request.requestId().isBlank() || request.requestId().length() > 64 || request.answers() == null)
+            throw new IllegalArgumentException("请刷新考试页面后重试，当前请求缺少答案版本");
+        String hash = answerRequestHash(request, submit);
+        if (request.requestId().equals(attempt.getLastAnswerRequestId())) {
+            if (!hash.equals(attempt.getLastAnswerRequestHash()))
+                throw new AnswerConflictException("这次请求的内容已改变，请先核对服务器保存的答案");
+            expireIfDue(attempt);
+            return true;
+        }
+        // Use server receipt time, never a timestamp supplied in the answer body.
+        boolean open = attempt.getStatus() == AttemptStatus.IN_PROGRESS
+                && attempt.getExam().getStatus() == ExamStatus.PUBLISHED
+                && receivedAt.isBefore(submissionDeadline(attempt));
+        if (!open) {
+            expireIfDue(attempt);
+            return sameAnswers(attempt, request);
+        }
+        if (request.expectedRevision() != attempt.getAnswerRevision())
+            throw new AnswerConflictException("另一页面已保存了更新的答案，本页内容已保留，请核对后继续");
+        applyAnswers(attempt, request);
+        attempt.setAnswerRevision(attempt.getAnswerRevision() + 1);
+        attempt.setLastAnswerRequestId(request.requestId());
+        attempt.setLastAnswerRequestHash(hash);
+        if (submit || (attempt.getExam().isBasicAntiCheat() && attempt.getFocusLossCount() >= 2))
+            grade(attempt, receivedAt.isAfter(deadline(attempt)) ? deadline(attempt) : receivedAt);
+        else expireIfDue(attempt);
+        return true;
+    }
+
+    private boolean sameAnswers(ExamAttempt attempt, ExamDtos.SubmitRequest request) {
+        Map<Long, AttemptAnswer> saved = answerMap(attempt);
+        Set<Long> ids = attemptItems(attempt).stream().map(i -> i.question().getId()).collect(Collectors.toSet());
+        return ids.containsAll(request.answers().keySet()) && request.focusLossCount() <= attempt.getFocusLossCount()
+                && request.answers().entrySet().stream().allMatch(e -> Objects.equals(
+                Objects.toString(e.getValue(), ""), saved.containsKey(e.getKey()) ? Objects.toString(saved.get(e.getKey()).getAnswerText(), "") : ""));
+    }
+
+    private String answerRequestHash(ExamDtos.SubmitRequest request, boolean submit) {
+        try {
+            String body = new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(
+                    List.of(submit, request.expectedRevision(), request.focusLossCount(), new TreeMap<>(request.answers())));
+            return HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(body.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        } catch (java.security.NoSuchAlgorithmException | com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new IllegalStateException("无法校验答案请求", e);
+        }
+    }
+
+    public int submissionGraceSeconds() { return Math.max(0, Math.min(30, submissionGraceSeconds)); }
+    private Instant submissionDeadline(ExamAttempt attempt) { return deadline(attempt).plusSeconds(submissionGraceSeconds()); }
 
     @Transactional
     public List<ExamDtos.GradeView> grades(String employeeNo) {
@@ -278,12 +340,12 @@ public class ExamService {
             ExamDtos.ManualScore score = request.scores().get(item.question().getId());
             if (score == null || score.awardedPoints() == null || score.awardedPoints() < 0 || score.awardedPoints() > item.points()) throw new IllegalArgumentException("第 " + item.position() + " 题得分不能超过 " + item.points() + " 分且不能小于0");
             Double similarity = score.semanticSimilarity();
-            if ((item.type() == QuestionType.SHORT_ANSWER && similarity == null) || (similarity != null && (!Double.isFinite(similarity) || similarity < 0 || similarity > 100))) throw new IllegalArgumentException("请填写简答题语义相似度（0至100%），相似度与得分分别评定");
+            if (similarity != null && (!Double.isFinite(similarity) || similarity < 0 || similarity > 100)) throw new IllegalArgumentException("语义相似度须在0至100%之间");
             AttemptAnswer answer = answers.get(item.question().getId());
             answer.setAwardedPoints(score.awardedPoints());
             answer.setSemanticSimilarity(similarity);
             answer.setSimilaritySource(similarity == null ? null : "MANUAL_REVIEW");
-            answer.setCorrect(item.type() == QuestionType.SHORT_ANSWER ? similarity >= 30 : score.awardedPoints() == item.points());
+            answer.setCorrect(item.type() == QuestionType.SHORT_ANSWER && similarity != null ? similarity >= 30 : score.awardedPoints() == item.points());
             if (item.type() == QuestionType.FILL_BLANK) {
                 int blanks = FillBlankGrading.blankCount(item.answer());
                 if (score.correctBlanks() == null || score.correctBlanks() < 0 || score.correctBlanks() > blanks)
@@ -294,8 +356,12 @@ public class ExamService {
             }
             answer.setGradingMethod(GradingMethod.MANUAL);
             answer.setGradingComment(trimToNull(score.comment()));
-            if(answer.getShortReviewState()!=null) {
+            if(item.type()==QuestionType.SHORT_ANSWER) {
+                if(answer.getAiSuggestedPoints()!=null && !answer.getAiSuggestedPoints().equals(score.awardedPoints())) shortAutomation.invalidateDecision(answer);
+                answer.setShortScoringPolicyVersion(ShortAnswerScoring.POLICY);
+                answer.setCorrect(ShortAnswerScoring.correctByScore(score.awardedPoints(),item.points()));
                 answer.setShortRunToken(null);answer.setShortReviewState("ACCEPTED");answer.setShortRevision(answer.getShortRevision()+1);
+                answer.setAiStatus("SHORT_ACCEPTED");
                 answer.setShortSampleDisagreed(answer.isShortSampleDisagreed() || (answer.getAiSuggestedPoints()!=null && !answer.getAiSuggestedPoints().equals(score.awardedPoints())));
                 answer.setShortSampleApproved(false);
             }
@@ -345,7 +411,7 @@ public class ExamService {
 
     private boolean isDue(ExamAttempt attempt) {
         return attempt.getStatus() == AttemptStatus.IN_PROGRESS
-                && (!Instant.now().isBefore(deadline(attempt)) || attempt.getExam().getStatus() == ExamStatus.CLOSED);
+                && (!Instant.now().isBefore(submissionDeadline(attempt)) || attempt.getExam().getStatus() == ExamStatus.CLOSED);
     }
 
     private void expireIfDue(ExamAttempt attempt) {
@@ -355,7 +421,7 @@ public class ExamService {
         }
         if (attempt.getStatus() != AttemptStatus.IN_PROGRESS) return;
         Instant deadline = deadline(attempt);
-        if (!Instant.now().isBefore(deadline) || attempt.getExam().getStatus() == ExamStatus.CLOSED) {
+        if (!Instant.now().isBefore(submissionDeadline(attempt)) || attempt.getExam().getStatus() == ExamStatus.CLOSED) {
             grade(attempt, Instant.now().isBefore(deadline) ? Instant.now() : deadline);
         }
     }
@@ -399,6 +465,8 @@ public class ExamService {
                 else score += answer.getAwardedPoints();
             } else {
                 requiresManualGrading = true;
+                if(item.type()==QuestionType.SHORT_ANSWER && ShortAnswerReviewService.initializeEmpty(answer)) continue;
+                if(item.type()==QuestionType.SHORT_ANSWER) answer.setShortReviewState("NOT_STARTED");
                 answer.setCorrect(null);
                 answer.setAwardedPoints(null);
                 answer.setGradingMethod(null);
@@ -442,6 +510,11 @@ public class ExamService {
         Map<Long, AttemptAnswer> answers = answerMap(attempt);
         boolean changed = false;
         for (AttemptItem item : items) {
+            if(item.type()==QuestionType.SHORT_ANSWER) {
+                var shortAnswer=answers.get(item.question().getId());
+                if(shortAnswer!=null) changed=ShortAnswerReviewService.initializeEmpty(shortAnswer)||changed;
+                continue;
+            }
             if (item.type() != QuestionType.FILL_BLANK) continue;
             AttemptAnswer answer = answers.get(item.question().getId());
             if (answer != null && (!answer.getBlankMarks().isEmpty() || answer.getAwardedPoints() != null)) continue;
@@ -465,6 +538,7 @@ public class ExamService {
     }
 
     private boolean needsManual(AttemptItem item, AttemptAnswer answer) {
+        if(item.type()==QuestionType.SHORT_ANSWER && answer!=null && answer.getAwardedPoints()!=null && answer.getShortReviewState()!=null) return false;
         if (item.type() == QuestionType.FILL_BLANK && answer != null && !answer.getBlankMarks().isEmpty()) return false;
         return !answerGrader.isObjective(item.type()) || (item.type() == QuestionType.FILL_BLANK && answer != null
                 && (answer.getAwardedPoints() == null || answer.getGradingMethod() == GradingMethod.MANUAL));
@@ -543,7 +617,10 @@ public class ExamService {
 
     private void ensureSnapshots(Exam exam) {
         // Compatibility for exams created before snapshot columns were introduced.
-        exam.getQuestions().stream().filter(q -> q.getSnapshotType() == null).forEach(ExamQuestion::captureSnapshot);
+        exam.getQuestions().stream().filter(q -> q.getSnapshotType() == null).forEach(q -> {
+            if(q.getQuestion().getType()==QuestionType.SHORT_ANSWER) q.setShortSnapshotUnreliable(true);
+            q.captureSnapshot();
+        });
     }
 
     private List<AttemptItem> orderedItems(ExamAttempt a) {
@@ -563,7 +640,7 @@ public class ExamService {
                     item.type() == QuestionType.FILL_BLANK ? FillBlankGrading.blankCount(item.answer()) : 0);
         }).toList();
         return new ExamDtos.AttemptView(a.getId(), a.getExam().getId(), a.getExam().getTitle(), a.getExam().getStatus() == ExamStatus.CANCELLED ? AttemptStatus.CANCELLED : a.getStatus(), a.getStartedAt(),
-                deadline(a), questions, Instant.now(), a.getExam().isBasicAntiCheat(), a.getFocusLossCount());
+                deadline(a), questions, Instant.now(), a.getExam().isBasicAntiCheat(), a.getFocusLossCount(), a.getAnswerRevision(), submissionDeadline(a));
     }
 
     private Map<Long, AttemptAnswer> answerMap(ExamAttempt a) {

@@ -74,13 +74,14 @@ class AiUsageServiceTest {
 
     @Test void sameUserCannotOccupyTwoSlotsAndReleaseIsIdempotent() {
         String first=usage.acquire(1L,60);
-        assertThatThrownBy(()->usage.acquire(1L,60)).isInstanceOf(AiCallLimitException.class);
+        assertThatThrownBy(()->usage.acquire(1L,60)).isInstanceOfSatisfying(AiCallLimitException.class,e->assertThat(e.isRetryable()).isTrue());
         String second=usage.acquire(2L,60);
         complete(first); complete(first); complete(second);
         assertThat(usage.today()).containsEntry("active",0L).containsEntry("succeeded",2L)
                 .containsEntry("promptTokens",200L).containsEntry("completionTokens",20L);
         complete(usage.acquire(1L,60));
-        assertThatThrownBy(()->usage.acquire(1L,60)).hasMessageContaining("该学员今日");
+        assertThatThrownBy(()->usage.acquire(1L,60)).hasMessageContaining("该学员今日")
+                .isInstanceOfSatisfying(AiCallLimitException.class,e->assertThat(e.isRetryable()).isFalse());
     }
 
     @Test void dailyCapIsAtomicUnderConcurrentAdmission() throws Exception {

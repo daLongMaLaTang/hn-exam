@@ -71,11 +71,23 @@ public final class ExamDtos {
 
     public record AttemptView(Long attemptId, Long examId, String examTitle, AttemptStatus status,
                               Instant startedAt, Instant deadline, List<AttemptQuestion> questions,
-                              Instant serverTime, boolean basicAntiCheat, int focusLossCount) {}
+                              Instant serverTime, boolean basicAntiCheat, int focusLossCount, long answerRevision,
+                              Instant submissionDeadline) {}
 
-    public record SaveAck(AttemptStatus status, Instant serverTime, int focusLossCount) {}
+    public record SaveAck(AttemptStatus status, Instant serverTime, int focusLossCount,
+                          long answerRevision, boolean answersAccepted) {}
 
-    public record SubmitRequest(@NotNull @Size(max = 1000) Map<Long, @Size(max = 10000) String> answers, @Min(0) int focusLossCount) {}
+    public record SubmitRequest(@NotNull @Size(max = 1000) Map<Long, @Size(max = 10000) String> answers,
+                                @Min(0) int focusLossCount, @NotNull(message = "考试页面已更新，请保留草稿并刷新后继续") @Min(0) Long expectedRevision,
+                                @NotBlank(message = "考试页面已更新，请保留草稿并刷新后继续") @Size(max = 64) String requestId) {
+        // Convenience for a new, untouched attempt in fixtures and internal callers.
+        public SubmitRequest(Map<Long, String> answers, int focusLossCount) {
+            this(answers, focusLossCount, 0L, java.util.UUID.randomUUID().toString());
+        }
+    }
+
+    public record SubmissionAck(AttemptStatus status, Instant serverTime, int focusLossCount,
+                                long answerRevision, boolean answersAccepted, GradeView grade) {}
 
     public record Detail(Long id, String title, String courseCode, String description, int durationMinutes, int totalScore,
                          int passScore, Instant startTime, Instant endTime, ExamStatus status,

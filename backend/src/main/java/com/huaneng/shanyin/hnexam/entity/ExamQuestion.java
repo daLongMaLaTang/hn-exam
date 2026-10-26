@@ -13,6 +13,10 @@ import lombok.Setter;
 @Setter
 @NoArgsConstructor
 public class ExamQuestion {
+    private Long shortRubricId;
+    private Boolean shortSnapshotUnreliable;
+    @Lob private String shortScoringConfig;
+    private java.time.Instant shortLockedAt;
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;

@@ -28,6 +28,7 @@ class FillBlankReviewIntegrationTest {
     @Autowired UserRepository users;
     @Autowired RoleRepository roles;
     @Autowired MockMvc mvc;
+    @Autowired org.springframework.jdbc.core.JdbcTemplate jdbc;
     final Deque<String> preparedUsers = new ArrayDeque<>();
     @org.junit.jupiter.api.BeforeEach void prepareRoster() {
         // Publish-time rosters require learners to exist before the exam is published.
@@ -35,7 +36,7 @@ class FillBlankReviewIntegrationTest {
     }
 
     Question question(String reference) {
-        var q=new Question();q.setType(QuestionType.FILL_BLANK);q.setStem("测试填空（ ）（ ）"+UUID.randomUUID());q.setAnswer(reference);q.setCourseCode("TEST");q.setStatus(QuestionStatus.ACTIVE);return questions.save(q);
+        var q=new Question();q.setType(QuestionType.FILL_BLANK);q.setStem("测试填空：第一项（ ），第二项（ ）"+UUID.randomUUID());q.setAnswer(reference);q.setCourseCode("TEST");q.setStatus(QuestionStatus.ACTIVE);return questions.save(q);
     }
     Long exam(Question q,int points) {
         var r=new ExamDtos.SaveRequest("集中阅卷验证","TEST",List.of(),"",30,points,points,null,null,false,1,false,false,false,10,List.of(new ExamDtos.QuestionItem(q.getId(),points,1)));
@@ -50,6 +51,118 @@ class FillBlankReviewIntegrationTest {
     }
     void decide(Long eid,FillBlankReviewService.Group g,boolean correct,boolean remember) {
         blanks.decide(eid,new FillBlankReviewService.DecisionRequest(g.questionId(),g.version(),g.slot(),g.submitted(),correct,remember,g.answerIds()),"admin");
+    }
+    FillBlankReviewService.PartialRequest partial(FillBlankReviewService.Group g, Map<Integer,Boolean> verdicts) {
+        return new FillBlankReviewService.PartialRequest(g.questionId(),g.version(),g.slot(),g.submitted(),g.answerIds(),g.slots(),verdicts);
+    }
+    @Test void partialDecisionPreservesMatchesScoresPermutationsAndDoesNotTeachOrPublish() throws Exception {
+        var q=question("甲;乙;丙");q.setStem("包括___、___、___。");questions.save(q);
+        Long e=exam(q,5),a=submit(e,q,"[\"甲\",\"乙的别称\",\"错项\"]"),b=submit(e,q,"[\"错项\",\"甲\",\"乙的别称\"]");
+        var g=blanks.workspace(e).groups().get(0);
+        assertThat(g.count()).isEqualTo(2);
+        assertThat(g.slots()).filteredOn(s -> Boolean.TRUE.equals(s.correct())).hasSize(1);
+        assertThat(g.scorePreviews()).containsExactly(new FillBlankReviewService.ScorePreview(5,3,0,0));
+        var verdicts=new HashMap<Integer,Boolean>();
+        g.slots().stream().filter(s -> s.correct()==null).forEach(s -> verdicts.put(s.slot(),s.submitted().equals("乙的别称")));
+        mvc.perform(post("/api/exams/"+e+"/blank-review/partial-decisions")
+                .with(jwt().jwt(j -> j.subject(user())).authorities(new SimpleGrantedAuthority("SYSTEM_ADMIN")))
+                .contentType("application/json").content(new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(partial(g,verdicts))))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.affected").value(2));
+        for(Long id:List.of(a,b)) {
+            var review=exams.review(id,null);
+            assertThat(review.questions().get(0).awardedPoints()).isEqualTo(3);
+            assertThat(review.questions().get(0).correct()).isFalse();
+            assertThat(review.grade().status()).isEqualTo(AttemptStatus.SUBMITTED);
+            assertThat(review.grade().score()).isNull();
+        }
+        var w=blanks.workspace(e);assertThat(w.rules()).isEmpty();assertThat(w.groups()).isEmpty();assertThat(w.history()).hasSize(2);
+        assertThat(w.history()).extracting(FillBlankReviewService.History::correct).containsExactlyInAnyOrder(true,false);
+        assertThatThrownBy(() -> blanks.decidePartial(e,partial(g,verdicts),"admin")).hasMessageContaining("状态已变化");
+        Long e2=exam(q,5);submit(e2,q,"[\"甲\",\"乙的别称\",\"错项\"]");assertThat(blanks.workspace(e2).pendingSlots()).isEqualTo(2);
+        blanks.publish(e,"admin",2);
+        var accepted=w.history().stream().filter(FillBlankReviewService.History::correct).findFirst().orElseThrow();
+        assertThatThrownBy(() -> blanks.revoke(e,accepted.id(),false,"admin")).hasMessageContaining("已公布");
+        blanks.revoke(e,accepted.id(),true,"admin");
+        var reopened=blanks.workspace(e);assertThat(reopened.pendingSlots()).isEqualTo(2);
+        assertThat(reopened.groups().get(0).slots()).filteredOn(s -> Boolean.TRUE.equals(s.correct())).hasSize(1);
+        assertThat(reopened.groups().get(0).slots()).filteredOn(s -> Boolean.FALSE.equals(s.correct())).hasSize(1);
+    }
+    @Test void partialDecisionRejectsMissingSlotsMatchedSlotChangesAndStalePopulation() {
+        var q=question("甲;乙;丙");q.setStem("包括___、___、___。");questions.save(q);
+        Long e=exam(q,6);submit(e,q,"[\"甲\",\"新乙\",\"新丙\"]");var g=blanks.workspace(e).groups().get(0);
+        var pending=g.slots().stream().filter(s -> s.correct()==null).toList();
+        assertThatThrownBy(() -> blanks.decidePartial(e,partial(g,Map.of(pending.get(0).slot(),true)),"admin")).hasMessageContaining("全部待判");
+        var all=new HashMap<Integer,Boolean>();g.slots().forEach(s -> all.put(s.slot(),true));
+        assertThatThrownBy(() -> blanks.decidePartial(e,partial(g,all),"admin")).hasMessageContaining("已判定");
+        assertThat(blanks.workspace(e).history()).isEmpty();
+        var verdicts=new HashMap<Integer,Boolean>();pending.forEach(s -> verdicts.put(s.slot(),true));
+        submit(e,q,"[\"新丙\",\"甲\",\"新乙\"]");
+        assertThatThrownBy(() -> blanks.decidePartial(e,partial(g,verdicts),"admin")).hasMessageContaining("人数或判定状态已变化");
+        assertThat(blanks.workspace(e).history()).isEmpty();
+    }
+    @Test void partialDecisionsCountDuplicateAnswersSeparatelyAndKeepOtherBlanksPending() {
+        var q=question("甲;乙;丙;温度");q.setStem("包括___、___、___，温度为___。");questions.save(q);
+        Long e=exam(q,8),a=submit(e,q,"[\"同一表达\",\"同一表达\",\"错项\",\"未知温度\"]");
+        var g=blanks.workspace(e).groups().get(0);
+        assertThat(g.scorePreviews()).containsExactly(new FillBlankReviewService.ScorePreview(8,4,0,1));
+        var duplicates=g.slots().stream().filter(s -> s.submitted().equals("同一表达")).toList();assertThat(duplicates).hasSize(2);
+        var verdicts=new HashMap<Integer,Boolean>();g.slots().forEach(s -> verdicts.put(s.slot(),s.slot()==duplicates.get(0).slot()));
+        blanks.decidePartial(e,partial(g,verdicts),"admin");
+        assertThat(exams.review(a,null).questions().get(0).awardedPoints()).isNull();
+        var remaining=blanks.workspace(e);assertThat(remaining.pendingSlots()).isEqualTo(1);assertThat(remaining.readyCount()).isZero();
+        decide(e,remaining.groups().get(0),false,false);
+        assertThat(exams.review(a,null).questions().get(0).awardedPoints()).isEqualTo(2);
+    }
+    @Test void consecutiveBlanksMatchPermutationsAndMergeUnknownPermutations() {
+        var q=question("甲;乙;丙");q.setStem("列出三项（ ）、（ ）、（ ）。");questions.save(q);
+        Long e=exam(q,9), correct=submit(e,q,"[\"丙\",\"甲\",\"乙\"]");
+        Long a=submit(e,q,"[\"新甲\",\"新乙\",\"丙\"]"), b=submit(e,q,"[\"丙\",\"新乙\",\"新甲\"]");
+        var w=blanks.workspace(e);assertThat(w.groups()).hasSize(1);
+        assertThat(w.pendingSlots()).isEqualTo(4);
+        assertThat(w.groups()).allSatisfy(g->{assertThat(g.count()).isEqualTo(2);assertThat(g.slotLabel()).contains("1–3");});
+        assertThat(exams.review(correct,null).questions().get(0).awardedPoints()).isEqualTo(9);
+        for(var g:w.groups()) decide(e,g,true,false);
+        assertThat(exams.review(a,null).questions().get(0).awardedPoints()).isEqualTo(9);
+        assertThat(exams.review(b,null).questions().get(0).awardedPoints()).isEqualTo(9);
+        assertThat(exams.review(b,null).questions().get(0).savedAnswer()).isEqualTo("[\"丙\",\"新乙\",\"新甲\"]");
+        var decision=blanks.workspace(e).history().get(0);blanks.revoke(e,decision.id(),false,"admin");
+        assertThat(blanks.workspace(e).groups()).hasSize(1);assertThat(blanks.workspace(e).groups().get(0).count()).isEqualTo(2);
+    }
+    @Test void separatePositionsDuplicatesAndMultipleBlocksCannotStealAnswers() {
+        var q=question("甲;乙;温度;压力");q.setStem("包括___、___，温度为___，压力为___。");questions.save(q);
+        Long e=exam(q,8),a=submit(e,q,"[\"乙\",\"甲\",\"压力\",\"温度\"]");
+        assertThat(blanks.workspace(e).groups()).extracting(FillBlankReviewService.Group::slot).containsExactly(3,4);
+        for(var g:blanks.workspace(e).groups())decide(e,g,false,false);
+        assertThat(exams.review(a,null).questions().get(0).awardedPoints()).isEqualTo(4);
+        var repeated=question("甲;甲;乙");repeated.setStem("包括___、___、___。");questions.save(repeated);
+        Long e2=exam(repeated,9);submit(e2,repeated,"[\"乙\",\"甲\",\"乙\"]");
+        assertThat(blanks.workspace(e2).groups()).hasSize(1);assertThat(blanks.workspace(e2).readyCount()).isZero();
+        var alternatives=question("甲~乙;甲");alternatives.setStem("包括___、___。");questions.save(alternatives);
+        Long e3=exam(alternatives,10),c=submit(e3,alternatives,"[\"甲\",\"乙\"]");
+        assertThat(blanks.workspace(e3).groups()).isEmpty();assertThat(exams.review(c,null).questions().get(0).awardedPoints()).isEqualTo(10);
+    }
+    @Test void consecutiveAnswerLibraryKeepsTheWholeSetAndRejectRetainsMatchedBlanks() {
+        var q=question("甲;乙;丙");q.setStem("包括___、___、___。");questions.save(q);
+        Long e=exam(q,9);submit(e,q,"[\"新甲\",\"新乙\",\"丙\"]");
+        decide(e,blanks.workspace(e).groups().get(0),true,true);
+        Long e2=exam(q,9), accepted=submit(e2,q,"[\"丙\",\"新乙\",\"新甲\"]");
+        assertThat(blanks.workspace(e2).groups()).isEmpty();assertThat(exams.review(accepted,null).questions().get(0).awardedPoints()).isEqualTo(9);
+        Long rejected=submit(e2,q,"[\"新乙\",\"新乙\",\"丙\"]");
+        assertThat(blanks.workspace(e2).groups()).hasSize(1);decide(e2,blanks.workspace(e2).groups().get(0),false,false);
+        assertThat(exams.review(rejected,null).questions().get(0).awardedPoints()).isEqualTo(3);
+    }
+    @Test void legacyPendingPermutationsUpgradeWithoutChangingPublishedScores() {
+        var q=question("甲;乙");q.setStem("包括___、___。");questions.save(q);
+        Long e=exam(q,10),a=submit(e,q,"[\"乙\",\"甲\"]");
+        String legacy=FillBlankReviewService.hash("exam-blank-v1\0"+q.getStem()+"\0"+q.getAnswer());
+        jdbc.update("UPDATE fill_blank_mark SET submitted=CASE slot WHEN 1 THEN '乙' ELSE '甲' END, correct=null, source='PENDING', question_version=? WHERE answer_id IN (SELECT id FROM exam_attempt_answer WHERE attempt_id=?)",legacy,a);
+        jdbc.update("UPDATE exam_attempt_answer SET awarded_points=null WHERE attempt_id=?",a);
+        assertThat(blanks.workspace(e).groups()).isEmpty();assertThat(exams.review(a,null).questions().get(0).awardedPoints()).isEqualTo(10);
+        blanks.publish(e,"admin",1);
+        jdbc.update("UPDATE fill_blank_mark SET question_version=? WHERE answer_id IN (SELECT id FROM exam_attempt_answer WHERE attempt_id=?)",legacy,a);
+        blanks.workspace(e);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM fill_blank_mark WHERE question_version=? AND answer_id IN (SELECT id FROM exam_attempt_answer WHERE attempt_id=?)",Integer.class,legacy,a)).isEqualTo(2);
+        assertThat(exams.review(a,null).grade().score()).isEqualTo(10);
     }
     @Test void groupsExactTrimmedAnswersPerSlotAndPublishesOnlyWhenReady() {
         var q=question("甲;乙");Long e=exam(q,5);
@@ -154,6 +267,8 @@ class FillBlankReviewIntegrationTest {
             var auth=jwt().jwt(j -> j.subject(actor)).authorities(new SimpleGrantedAuthority(role));
             mvc.perform(get("/api/exams/"+e+"/blank-review").with(auth)).andExpect(status().isForbidden());
             mvc.perform(post("/api/exams/"+e+"/blank-review/publish").with(auth).contentType("application/json").content("{\"expectedCount\":1}")).andExpect(status().isForbidden());
+            mvc.perform(post("/api/exams/"+e+"/blank-review/partial-decisions").with(auth).contentType("application/json").content("{}"))
+                    .andExpect(status().isForbidden());
             mvc.perform(post("/api/exams/blank-rules/1/disable").with(auth)).andExpect(status().isForbidden());
         }
         mvc.perform(get("/api/exams/"+e+"/blank-review").with(jwt().jwt(j -> j.subject(actor)).authorities(new SimpleGrantedAuthority("SYSTEM_ADMIN"))))

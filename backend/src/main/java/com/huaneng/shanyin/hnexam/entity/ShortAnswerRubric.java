@@ -8,6 +8,14 @@ import java.time.Instant;
 @Entity @Getter @Setter @NoArgsConstructor
 @Table(name="short_answer_rubric", indexes=@Index(name="idx_rubric_question_version", columnList="question_id,question_version"))
 public class ShortAnswerRubric {
+    @Column(unique=true,length=64) private String reuseKey;
+    private String policyVersion;
+    private String normalizationVersion;
+    private Integer formatVersion;
+    private String preparationToken;
+    private Instant preparationLeaseUntil;
+    private Instant validatedAt;
+    @Column(length=1000) private String preparationError;
     @Id @GeneratedValue(strategy=GenerationType.IDENTITY) private Long id;
     @Column(nullable=false) private Long questionId;
     @Column(nullable=false,length=64) private String questionVersion;

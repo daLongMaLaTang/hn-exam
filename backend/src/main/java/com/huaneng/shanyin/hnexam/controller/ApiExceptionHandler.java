@@ -12,6 +12,11 @@ import com.huaneng.shanyin.hnexam.service.TooManyLoginAttemptsException;
 
 @RestControllerAdvice
 public class ApiExceptionHandler {
+    @ExceptionHandler(com.huaneng.shanyin.hnexam.service.AnswerConflictException.class)
+    @ResponseStatus(HttpStatus.CONFLICT)
+    public Map<String, String> answerConflict(com.huaneng.shanyin.hnexam.service.AnswerConflictException exception) {
+        return Map.of("code", "ANSWER_CONFLICT", "message", exception.getMessage());
+    }
     @ExceptionHandler(com.huaneng.shanyin.hnexam.service.AiCallLimitException.class)
     @ResponseStatus(HttpStatus.TOO_MANY_REQUESTS)
     public Map<String, String> aiLimit(com.huaneng.shanyin.hnexam.service.AiCallLimitException exception) {

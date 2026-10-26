@@ -33,7 +33,7 @@ public class ExamController {
     @PutMapping("/exams/{id}") @PreAuthorize("hasAnyAuthority('SYSTEM_ADMIN','DEPARTMENT_LEADER','TRAINING_ADMIN','SPECIALIST')")
     public ExamDtos.Summary update(@PathVariable Long id, @Valid @RequestBody ExamDtos.SaveRequest request) { return examService.update(id, request); }
     @PostMapping("/exams/{id}/publish") @PreAuthorize("hasAnyAuthority('SYSTEM_ADMIN','DEPARTMENT_LEADER','TRAINING_ADMIN')")
-    public ExamDtos.Summary publish(@PathVariable Long id) { return examService.publish(id); }
+    public ExamDtos.Summary publish(@PathVariable Long id,java.security.Principal p) { return examService.publish(id,p.getName()); }
     @PostMapping("/exams/{id}/close") @PreAuthorize("hasAnyAuthority('SYSTEM_ADMIN','DEPARTMENT_LEADER','TRAINING_ADMIN')")
     public ExamDtos.Summary close(@PathVariable Long id) { return examService.close(id); }
     @GetMapping("/exams/{id}/results") @PreAuthorize("hasAnyAuthority('SYSTEM_ADMIN','DEPARTMENT_LEADER','TRAINING_ADMIN','SPECIALIST')")
@@ -60,11 +60,11 @@ public class ExamController {
     @GetMapping("/candidate/attempts/{id}") @PreAuthorize("hasAuthority('CANDIDATE')")
     public ExamDtos.AttemptView attempt(@PathVariable Long id, @AuthenticationPrincipal Jwt jwt) { return examService.getAttempt(id, jwt.getSubject()); }
     @PutMapping("/candidate/attempts/{id}/answers") @PreAuthorize("hasAuthority('CANDIDATE')")
-    public ExamDtos.SaveAck saveAnswers(@PathVariable Long id, @AuthenticationPrincipal Jwt jwt, @Valid @RequestBody ExamDtos.SubmitRequest request) { return examService.saveAnswers(id, jwt.getSubject(), request); }
+    public ExamDtos.SaveAck saveAnswers(@PathVariable Long id, @AuthenticationPrincipal Jwt jwt, @Valid @RequestBody ExamDtos.SubmitRequest request) { return examService.saveAnswers(id, jwt.getSubject(), request, java.time.Instant.now()); }
     @GetMapping("/candidate/attempts/{id}/review") @PreAuthorize("hasAuthority('CANDIDATE')")
     public ExamDtos.Review review(@PathVariable Long id, @AuthenticationPrincipal Jwt jwt) { return examService.review(id, jwt.getSubject()); }
     @PostMapping("/candidate/attempts/{id}/submit") @PreAuthorize("hasAuthority('CANDIDATE')")
-    public ExamDtos.GradeView submit(@PathVariable Long id, @AuthenticationPrincipal Jwt jwt, @Valid @RequestBody ExamDtos.SubmitRequest request) { return examService.submit(id, jwt.getSubject(), request); }
+    public ExamDtos.SubmissionAck submit(@PathVariable Long id, @AuthenticationPrincipal Jwt jwt, @Valid @RequestBody ExamDtos.SubmitRequest request) { return examService.submitAcknowledged(id, jwt.getSubject(), request, java.time.Instant.now()); }
     @GetMapping("/candidate/grades") @PreAuthorize("hasAuthority('CANDIDATE')")
     public List<ExamDtos.GradeView> grades(@AuthenticationPrincipal Jwt jwt) {
         return examService.grades(jwt.getSubject());

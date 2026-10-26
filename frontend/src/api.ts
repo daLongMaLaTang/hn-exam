@@ -58,11 +58,29 @@ export async function login(employeeNo: string, password: string) {
   return result
 }
 
-export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
+export class ApiError extends Error {
+  status: number
+  code?: string
+  constructor(message: string, status: number, code?: string) { super(message); this.status = status; this.code = code }
+}
+
+export class RequestTimeoutError extends Error {
+  constructor() { super('请求超时，服务端是否收到尚待确认') }
+}
+
+export async function api<T>(path: string, options: RequestInit & { timeoutMs?: number } = {}): Promise<T> {
+  const { timeoutMs, ...requestOptions } = options
+  const controller = new AbortController()
+  const abort = () => controller.abort(options.signal?.reason)
+  if (options.signal?.aborted) abort()
+  options.signal?.addEventListener('abort', abort, { once: true })
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const perform = async () => {
   const token = localStorage.getItem(TOKEN_KEY)
   const multipart = options.body instanceof FormData
   const response = await fetch(path, {
-    ...options,
+    ...requestOptions,
+    signal: controller.signal,
     headers: {
       ...(!multipart ? { 'Content-Type': 'application/json' } : {}),
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
@@ -77,7 +95,17 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   if (!response.ok) {
     const body = await response.json().catch(() => ({})) as { message?: string }
     if (response.status === 403 && (body as {code?: string}).code === 'PASSWORD_CHANGE_REQUIRED') window.location.href = '/account'
-    throw new Error(body.message || `请求失败（${response.status}）`)
+    throw new ApiError(body.message || `请求失败（${response.status}）`, response.status, (body as {code?: string}).code)
   }
-  return response.json() as Promise<T>
+  return await response.json() as T
+  }
+  try {
+    if (!timeoutMs) return await perform()
+    return await Promise.race([perform(), new Promise<never>((_, reject) => {
+      timer = setTimeout(() => { reject(new RequestTimeoutError()); controller.abort() }, timeoutMs)
+    })])
+  } finally {
+    clearTimeout(timer)
+    options.signal?.removeEventListener('abort', abort)
+  }
 }

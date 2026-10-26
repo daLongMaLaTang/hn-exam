@@ -29,6 +29,14 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         "spring.jpa.hibernate.ddl-auto=create-drop", "app.exams.expiry-check-ms=3600000", "app.bootstrap.question-bank-path=", "spring.config.import=", "app.redis.enabled=false"})
 @AutoConfigureMockMvc
 class ExamLifecycleIntegrationTest {
+    @org.springframework.test.context.DynamicPropertySource
+    static void isolatedMysql(org.springframework.test.context.DynamicPropertyRegistry registry) {
+        if (!Boolean.getBoolean("hnexam.sync.mysql")) return;
+        // Deliberately fixed test schema: create-drop must never point at hn_exam.
+        registry.add("spring.datasource.url", () -> "jdbc:mysql://127.0.0.1:3306/hn_exam_sync_test_20261022?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai");
+        registry.add("spring.datasource.username", () -> System.getenv("HNEXAM_SYNC_TEST_USER"));
+        registry.add("spring.datasource.password", () -> System.getenv("HNEXAM_SYNC_TEST_PASSWORD"));
+    }
     @Autowired ExamService service;
     @Autowired com.huaneng.shanyin.hnexam.service.FillBlankReviewService blankReview;
     @Autowired com.huaneng.shanyin.hnexam.service.ExamExpiryScheduler expiryScheduler;
@@ -46,6 +54,95 @@ class ExamLifecycleIntegrationTest {
     @Autowired com.huaneng.shanyin.hnexam.service.OpenAiCompatibleGradingProvider ai;
 
 
+    @Test void finalSnapshotArrivingDuringTenSecondBufferIsAcceptedAndFrozen() {
+        var u=user(); var q=question(QuestionType.SINGLE_CHOICE); var a=service.start(publish(q,false,1),u.getEmployeeNo());
+        var save=service.saveAnswers(a.attemptId(),u.getEmployeeNo(),answers(q,"B"));
+        tx.executeWithoutResult(s -> attempts.findById(a.attemptId()).orElseThrow().setDeadline(Instant.now().minusSeconds(3)));
+        expiryScheduler.autoSubmitExpired();
+        assertThat(service.getAttempt(a.attemptId(),u.getEmployeeNo()).status()).isEqualTo(AttemptStatus.IN_PROGRESS);
+        var request=answers(q,"A",save.answerRevision());
+        var result=service.submitAcknowledged(a.attemptId(),u.getEmployeeNo(),request,Instant.now());
+        assertThat(result.answersAccepted()).isTrue(); assertThat(result.grade().score()).isEqualTo(100);
+        var retry=service.submitAcknowledged(a.attemptId(),u.getEmployeeNo(),request,Instant.now());
+        assertThat(retry.answerRevision()).isEqualTo(result.answerRevision()); assertThat(retry.answersAccepted()).isTrue();
+        var changed=service.submitAcknowledged(a.attemptId(),u.getEmployeeNo(),answers(q,"B",result.answerRevision()),Instant.now());
+        assertThat(changed.answersAccepted()).isFalse(); assertThat(changed.grade().score()).isEqualTo(100);
+    }
+
+    @Test void lateAnswersAreExplicitlyUnacceptedAndDoNotReplaceSavedContent() {
+        var u=user(); var q=question(QuestionType.SINGLE_CHOICE); var a=service.start(publish(q,false,1),u.getEmployeeNo());
+        service.saveAnswers(a.attemptId(),u.getEmployeeNo(),answers(q,"B"));
+        tx.executeWithoutResult(s -> attempts.findById(a.attemptId()).orElseThrow().setDeadline(Instant.now().minusSeconds(15)));
+        var result=service.submitAcknowledged(a.attemptId(),u.getEmployeeNo(),answers(q,"A",1),Instant.now());
+        assertThat(result.answersAccepted()).isFalse(); assertThat(result.grade().score()).isZero();
+        assertThat(service.getAttempt(a.attemptId(),u.getEmployeeNo()).questions().get(0).savedAnswer()).isEqualTo("B");
+    }
+
+    @Test void serverReceiptTimeSurvivesDatabaseWaitAcrossUploadCutoff() {
+        var u=user(); var q=question(QuestionType.SINGLE_CHOICE); var a=service.start(publish(q,false,1),u.getEmployeeNo());
+        Instant received=Instant.now().minusSeconds(6);
+        tx.executeWithoutResult(s -> attempts.findById(a.attemptId()).orElseThrow().setDeadline(Instant.now().minusSeconds(12)));
+        var result=service.submitAcknowledged(a.attemptId(),u.getEmployeeNo(),answers(q,"A"),received);
+        assertThat(result.answersAccepted()).isTrue(); assertThat(result.grade().score()).isEqualTo(100);
+    }
+
+    @Test void stalePageCannotSaveOrSubmitOverNewAnswers() {
+        var u=user(); var q=question(QuestionType.SINGLE_CHOICE); var a=service.start(publish(q,false,1),u.getEmployeeNo());
+        var first=service.saveAnswers(a.attemptId(),u.getEmployeeNo(),answers(q,"A"));
+        assertThat(first.answerRevision()).isEqualTo(1);
+        assertThatThrownBy(()->service.saveAnswers(a.attemptId(),u.getEmployeeNo(),answers(q,"B")))
+                .isInstanceOf(com.huaneng.shanyin.hnexam.service.AnswerConflictException.class);
+        assertThatThrownBy(()->service.submit(a.attemptId(),u.getEmployeeNo(),answers(q,"B")))
+                .isInstanceOf(com.huaneng.shanyin.hnexam.service.AnswerConflictException.class);
+        var stored=service.getAttempt(a.attemptId(),u.getEmployeeNo());
+        assertThat(stored.status()).isEqualTo(AttemptStatus.IN_PROGRESS); assertThat(stored.questions().get(0).savedAnswer()).isEqualTo("A");
+    }
+
+    @Test void saveResponseLossRetriesExactlyOnceAndRejectsRequestIdReuseWithDifferentContent() {
+        var u=user(); var q=question(QuestionType.SINGLE_CHOICE); var a=service.start(publish(q,false,1),u.getEmployeeNo());
+        var request=answers(q,"A");
+        var first=service.saveAnswers(a.attemptId(),u.getEmployeeNo(),request);
+        var retry=service.saveAnswers(a.attemptId(),u.getEmployeeNo(),request);
+        assertThat(retry.answerRevision()).isEqualTo(first.answerRevision()); assertThat(retry.answersAccepted()).isTrue();
+        var changed=new ExamDtos.SubmitRequest(Map.of(q.getId(),"B"),0,0L,request.requestId());
+        assertThatThrownBy(()->service.saveAnswers(a.attemptId(),u.getEmployeeNo(),changed))
+                .isInstanceOf(com.huaneng.shanyin.hnexam.service.AnswerConflictException.class);
+    }
+
+    @Test void twoConcurrentWritersHaveOnlyOneWinner() throws Exception {
+        var u=user(); var q=question(QuestionType.SINGLE_CHOICE); var a=service.start(publish(q,false,1),u.getEmployeeNo());
+        var pool=Executors.newFixedThreadPool(2); var gate=new CountDownLatch(1);
+        try {
+            List<Callable<Boolean>> writes=List.of("A","B").stream().<Callable<Boolean>>map(value -> () -> {
+                gate.await();
+                try { service.saveAnswers(a.attemptId(),u.getEmployeeNo(),answers(q,value)); return true; }
+                catch (com.huaneng.shanyin.hnexam.service.AnswerConflictException expected) { return false; }
+            }).toList();
+            var one=pool.submit(writes.get(0)); var two=pool.submit(writes.get(1)); gate.countDown();
+            assertThat(List.of(one.get(10,TimeUnit.SECONDS),two.get(10,TimeUnit.SECONDS))).containsExactlyInAnyOrder(true,false);
+            assertThat(service.getAttempt(a.attemptId(),u.getEmployeeNo()).answerRevision()).isEqualTo(1);
+        } finally { pool.shutdownNow(); }
+    }
+
+    @Test void httpRequiresVersionAndReturnsActionableConflict() throws Exception {
+        var u=user(); var q=question(QuestionType.SINGLE_CHOICE); var a=service.start(publish(q,false,1),u.getEmployeeNo());
+        String path="/api/candidate/attempts/"+a.attemptId()+"/answers";
+        var auth=jwt().jwt(j->j.subject(u.getEmployeeNo())).authorities(new SimpleGrantedAuthority("CANDIDATE"));
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put(path).with(auth).contentType("application/json")
+                .content("{\"answers\":{},\"focusLossCount\":0}")).andExpect(status().isBadRequest());
+        service.saveAnswers(a.attemptId(),u.getEmployeeNo(),answers(q,"A"));
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put(path).with(auth).contentType("application/json")
+                .content(new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(answers(q,"B"))))
+                .andExpect(status().isConflict()).andExpect(jsonPath("$.code").value("ANSWER_CONFLICT"));
+    }
+
+    @Test void closingAnExamDoesNotAllowGraceUploadsToChangeIt() {
+        var u=user(); var q=question(QuestionType.SINGLE_CHOICE); var a=service.start(publish(q,false,1),u.getEmployeeNo());
+        service.saveAnswers(a.attemptId(),u.getEmployeeNo(),answers(q,"B")); service.close(a.examId());
+        var result=service.submitAcknowledged(a.attemptId(),u.getEmployeeNo(),answers(q,"A",1),Instant.now());
+        assertThat(result.answersAccepted()).isFalse(); assertThat(result.grade().score()).isZero();
+    }
+
     @Test void publishedSnapshotAutosaveResumeAndIdempotentSubmission() {
         AppUser user = user(); Question q = question(QuestionType.SINGLE_CHOICE);
         Long examId = publish(q, true, 2);
@@ -56,7 +153,7 @@ class ExamLifecycleIntegrationTest {
         var resumed = service.start(examId, user.getEmployeeNo());
         assertThat(resumed.attemptId()).isEqualTo(start.attemptId());
         assertThat(resumed.questions().get(0).savedAnswer()).isEqualTo("A");
-        assertThat(service.submit(start.attemptId(), user.getEmployeeNo(), answers(q, "A")).score()).isEqualTo(100);
+        assertThat(service.submit(start.attemptId(), user.getEmployeeNo(), answers(q, "A", resumed.answerRevision())).score()).isEqualTo(100);
         assertThat(service.submit(start.attemptId(), user.getEmployeeNo(), answers(q, "B")).score()).isEqualTo(100);
         assertThat(service.review(start.attemptId(), user.getEmployeeNo()).questions().get(0).correctAnswer()).isEqualTo("A");
         assertThatThrownBy(() -> service.start(examId, user.getEmployeeNo())).hasMessageContaining("已通过");
@@ -67,7 +164,7 @@ class ExamLifecycleIntegrationTest {
         AppUser user = user(); Question q = question(QuestionType.SINGLE_CHOICE);
         var a = service.start(publish(q, false, 1), user.getEmployeeNo());
         service.saveAnswers(a.attemptId(), user.getEmployeeNo(), answers(q, "B"));
-        tx.executeWithoutResult(status -> attempts.findLockedById(a.attemptId()).orElseThrow().setDeadline(Instant.now().minusSeconds(5)));
+        tx.executeWithoutResult(status -> attempts.findLockedById(a.attemptId()).orElseThrow().setDeadline(Instant.now().minusSeconds(15)));
         var result = service.submit(a.attemptId(), user.getEmployeeNo(), answers(q, "A"));
         assertThat(result.score()).isZero();
         assertThat(service.review(a.attemptId(), user.getEmployeeNo()).questions().get(0).savedAnswer()).isEqualTo("B");
@@ -77,7 +174,7 @@ class ExamLifecycleIntegrationTest {
         AppUser user = user(); Question q = question(QuestionType.SINGLE_CHOICE);
         var a = service.start(publish(q, false, 1), user.getEmployeeNo());
         service.saveAnswers(a.attemptId(), user.getEmployeeNo(), answers(q, "A"));
-        tx.executeWithoutResult(status -> attempts.findLockedById(a.attemptId()).orElseThrow().setDeadline(Instant.now().minusSeconds(5)));
+        tx.executeWithoutResult(status -> attempts.findLockedById(a.attemptId()).orElseThrow().setDeadline(Instant.now().minusSeconds(15)));
         expiryScheduler.autoSubmitExpired();
         assertThat(attempts.findById(a.attemptId()).orElseThrow().getStatus()).isEqualTo(AttemptStatus.GRADED);
         assertThat(attempts.findById(a.attemptId()).orElseThrow().getScore()).isEqualTo(100);
@@ -139,11 +236,16 @@ class ExamLifecycleIntegrationTest {
                 .hasMessageContaining("不能超过");
         var graded = service.manualGrade(started.attemptId(), "admin",
                 new ExamDtos.ManualGradeRequest(Map.of(subjective.getId(), new ExamDtos.ManualScore(45, "要点基本完整", 75.0)), "人工复核完成"));
+        assertThat(graded.grade().status()).isEqualTo(AttemptStatus.SUBMITTED);
+        assertThat(graded.grade().score()).isNull();
+        assertThat(graded.grade().pendingSubjectiveCount()).isZero();
+        blankReview.publish(examId,"admin",1);
+        graded=service.review(started.attemptId(),null);
         assertThat(graded.grade().status()).isEqualTo(AttemptStatus.GRADED);
         assertThat(graded.grade().score()).isEqualTo(85);
         assertThat(graded.grade().passed()).isTrue();
         assertThat(graded.grade().gradedByEmployeeNo()).isEqualTo("admin");
-        assertThat(graded.questions()).filteredOn(q -> !q.objective()).singleElement().satisfies(q -> {
+        assertThat(graded.questions()).filteredOn(q -> q.id().equals(subjective.getId())).singleElement().satisfies(q -> {
             assertThat(q.awardedPoints()).isEqualTo(45);
             assertThat(q.gradingMethod()).isEqualTo(GradingMethod.MANUAL);
             assertThat(q.gradingComment()).isEqualTo("要点基本完整");
@@ -229,7 +331,7 @@ class ExamLifecycleIntegrationTest {
                 var attempt = service.start(examId, candidate.getEmployeeNo());
                 var saved = service.saveAnswers(attempt.attemptId(), candidate.getEmployeeNo(), answers(q, "A"));
                 assertThat(saved.status()).isEqualTo(AttemptStatus.IN_PROGRESS);
-                return service.submit(attempt.attemptId(), candidate.getEmployeeNo(), answers(q, "A")).score();
+                return service.submit(attempt.attemptId(), candidate.getEmployeeNo(), answers(q, "A", saved.answerRevision())).score();
             }).toList();
             List<Future<Integer>> results = pool.invokeAll(tasks);
             for (Future<Integer> result : results) assertThat(result.get(30, TimeUnit.SECONDS)).isEqualTo(100);
@@ -241,23 +343,25 @@ class ExamLifecycleIntegrationTest {
     @Test void secondFocusLossSavesCurrentAnswerAndForcesSubmission() {
         var u=user(); var q=question(QuestionType.SINGLE_CHOICE); var a=service.start(publish(q,false,1),u.getEmployeeNo());
         assertThat(service.saveAnswers(a.attemptId(),u.getEmployeeNo(),new ExamDtos.SubmitRequest(Map.of(q.getId(),"B"),1)).status()).isEqualTo(AttemptStatus.IN_PROGRESS);
-        var ack=service.saveAnswers(a.attemptId(),u.getEmployeeNo(),new ExamDtos.SubmitRequest(Map.of(q.getId(),"A"),2));
+        var ack=service.saveAnswers(a.attemptId(),u.getEmployeeNo(),new ExamDtos.SubmitRequest(Map.of(q.getId(),"A"),2,1L,UUID.randomUUID().toString()));
         assertThat(ack.status()).isEqualTo(AttemptStatus.GRADED);
         assertThat(service.submit(a.attemptId(),u.getEmployeeNo(),answers(q,"B")).score()).isEqualTo(100);
         assertThat(service.getAttempt(a.attemptId(),u.getEmployeeNo()).focusLossCount()).isEqualTo(2);
     }
-    @Test @WithMockUser(authorities="CANDIDATE") void similarityBoundaryAndPersonalSubjectivePaperKeepScoresIndependent() {
+    @Test @WithMockUser(authorities="CANDIDATE") void scoreBoundaryAndPersonalSubjectivePaperKeepScoresIndependent() {
         var u=user();var q=question(QuestionType.SHORT_ANSWER);var token=Jwt.withTokenValue("test").header("alg","HS256").subject(u.getEmployeeNo()).build();
         var original=service.start(publish(q,false,1),u.getEmployeeNo());service.submit(original.attemptId(),u.getEmployeeNo(),answers(q,"语义不同"));
-        assertThatThrownBy(()->service.manualGrade(original.attemptId(),"admin",new ExamDtos.ManualGradeRequest(Map.of(q.getId(),new ExamDtos.ManualScore(90,"缺相似度")),null))).hasMessageContaining("相似度");
-        service.manualGrade(original.attemptId(),"admin",new ExamDtos.ManualGradeRequest(Map.of(q.getId(),new ExamDtos.ManualScore(90,"分别评估",29.9)),null));
+        service.manualGrade(original.attemptId(),"admin",new ExamDtos.ManualGradeRequest(Map.of(q.getId(),new ExamDtos.ManualScore(30,"新策略按最终分判错题",99.0)),null));
+        blankReview.publish(original.examId(),"admin",1);
         assertThat(wrong.unresolved(u.getId(),null)).extracting(Question::getId).contains(q.getId());
         var req=new ExamDtos.SaveRequest("错题主观题", "TEST",List.of(),"",30,100,90,null,null,false,1,false,true,true,10,List.of());
         Long id=service.create(req).id();service.publish(id);var retry=service.start(id,u.getEmployeeNo());
         assertThat(retry.questions()).extracting(ExamDtos.AttemptQuestion::id).contains(q.getId());
         var submitted=service.submit(retry.attemptId(),u.getEmployeeNo(),answers(q,"新作答"));assertThat(submitted.pendingSubjectiveCount()).isEqualTo(1);
-        var result=service.manualGrade(retry.attemptId(),"admin",new ExamDtos.ManualGradeRequest(Map.of(q.getId(),new ExamDtos.ManualScore(20,"语义达标，但要点得分20",30.0)),null));
-        assertThat(result.grade().score()).isEqualTo(20);assertThat(result.grade().passed()).isFalse();assertThat(result.grade().pendingSubjectiveCount()).isZero();
+        var result=service.manualGrade(retry.attemptId(),"admin",new ExamDtos.ManualGradeRequest(Map.of(q.getId(),new ExamDtos.ManualScore(40,"按得分脱离错题阈值",0.0)),null));
+        assertThat(result.grade().score()).isNull();assertThat(result.grade().pendingSubjectiveCount()).isZero();
+        blankReview.publish(id,"admin",1);result=service.review(retry.attemptId(),null);
+        assertThat(result.grade().score()).isEqualTo(40);assertThat(result.grade().passed()).isFalse();
         assertThat(wrong.unresolved(u.getId(),null)).isEmpty();assertThat(wrong.summary(u.getId()).resolutionRate()).isEqualTo(100);
         assertThat(practice.submit(q.getId(),new QuestionDtos.PracticeSubmit("自行复习"),token).correct()).isNull();
         assertThat(wrong.unresolved(u.getId(),null)).isEmpty();
@@ -359,7 +463,7 @@ class ExamLifecycleIntegrationTest {
         Long closedExam = publish(q, false, 1);
         var closed = service.start(closedExam, closedUser.getEmployeeNo());
         tx.executeWithoutResult(s -> {
-            attempts.findById(due.attemptId()).orElseThrow().setDeadline(Instant.now().minusSeconds(1));
+            attempts.findById(due.attemptId()).orElseThrow().setDeadline(Instant.now().minusSeconds(15));
             attempts.findById(legacy.attemptId()).orElseThrow().setDeadline(null);
             exams.findById(closedExam).orElseThrow().setStatus(ExamStatus.CLOSED);
         });
@@ -381,7 +485,7 @@ class ExamLifecycleIntegrationTest {
         var live = service.start(exam, liveUser.getEmployeeNo());
         var due = service.start(exam, candidate.getEmployeeNo());
         service.saveAnswers(due.attemptId(), candidate.getEmployeeNo(), answers(q, "A"));
-        tx.executeWithoutResult(s -> attempts.findById(due.attemptId()).orElseThrow().setDeadline(Instant.now().minusSeconds(1)));
+        tx.executeWithoutResult(s -> attempts.findById(due.attemptId()).orElseThrow().setDeadline(Instant.now().minusSeconds(15)));
         var locked = new CountDownLatch(1);
         var release = new CountDownLatch(1);
         var pool = Executors.newFixedThreadPool(2);
@@ -402,7 +506,7 @@ class ExamLifecycleIntegrationTest {
         var q = question(QuestionType.SINGLE_CHOICE); var candidate = user();
         var a = service.start(publish(q, false, 1), candidate.getEmployeeNo());
         service.saveAnswers(a.attemptId(), candidate.getEmployeeNo(), answers(q, "A"));
-        tx.executeWithoutResult(s -> attempts.findById(a.attemptId()).orElseThrow().setDeadline(Instant.now().minusSeconds(1)));
+        tx.executeWithoutResult(s -> attempts.findById(a.attemptId()).orElseThrow().setDeadline(Instant.now().minusSeconds(15)));
         tx.executeWithoutResult(s -> { service.expireAttempt(a.attemptId()); s.setRollbackOnly(); });
         assertThat(attempts.findById(a.attemptId()).orElseThrow().getStatus()).isEqualTo(AttemptStatus.GRADED);
         assertThat(attempts.findById(a.attemptId()).orElseThrow().getScore()).isEqualTo(100);
@@ -412,7 +516,7 @@ class ExamLifecycleIntegrationTest {
         var q = question(QuestionType.SINGLE_CHOICE); var candidate = user();
         var a = service.start(publish(q, false, 1), candidate.getEmployeeNo());
         service.saveAnswers(a.attemptId(), candidate.getEmployeeNo(), answers(q, "A"));
-        tx.executeWithoutResult(s -> attempts.findById(a.attemptId()).orElseThrow().setDeadline(Instant.now().minusSeconds(1)));
+        tx.executeWithoutResult(s -> attempts.findById(a.attemptId()).orElseThrow().setDeadline(Instant.now().minusSeconds(15)));
         var pool = Executors.newFixedThreadPool(2);
         try {
             var expiry = pool.submit(() -> tx.executeWithoutResult(s -> { service.expireAttempt(a.attemptId()); s.setRollbackOnly(); }));
@@ -507,7 +611,7 @@ class ExamLifecycleIntegrationTest {
     @Test void expiredFillBlankPaperUsesSavedPartialAnswers() {
         var q = fillQuestion(); var candidate = user(); var attempt = service.start(publishFill(q, 10), candidate.getEmployeeNo());
         service.saveAnswers(attempt.attemptId(), candidate.getEmployeeNo(), answers(q, "人身；；设备"));
-        tx.executeWithoutResult(s -> attempts.findById(attempt.attemptId()).orElseThrow().setDeadline(Instant.now().minusSeconds(1)));
+        tx.executeWithoutResult(s -> attempts.findById(attempt.attemptId()).orElseThrow().setDeadline(Instant.now().minusSeconds(15)));
         service.expireAttempt(attempt.attemptId());
         assertThat(publishBlankAttempt(attempt.attemptId()).score()).isEqualTo(7);
     }
@@ -564,7 +668,7 @@ class ExamLifecycleIntegrationTest {
                 .andExpect(jsonPath("$.questions[0].savedAnswer").value(saved))
                 .andExpect(jsonPath("$.questions[0].answer").doesNotExist())
                 .andExpect(jsonPath("$.questions[0].correctAnswer").doesNotExist());
-        assertThat(service.submit(started.attemptId(), candidate.getEmployeeNo(), answers(q, saved)).score()).isNull();
+        assertThat(service.submit(started.attemptId(), candidate.getEmployeeNo(), answers(q, saved, 1)).score()).isNull();
         assertThat(publishBlankAttempt(started.attemptId()).score()).isEqualTo(7);
         assertThat(service.review(started.attemptId(), candidate.getEmployeeNo()).questions().get(0).savedAnswer()).isEqualTo(saved);
     }
@@ -781,6 +885,10 @@ class ExamLifecycleIntegrationTest {
     private Long publish(Question q, boolean retake, int count) {
         Long id = service.create(request(q, retake, count)).id(); service.publish(id); return id;
     }
+    private ExamDtos.SubmitRequest answers(Question q, String answer, long revision) {
+        return new ExamDtos.SubmitRequest(Map.of(q.getId(), answer), 0, revision, UUID.randomUUID().toString());
+    }
+
     private ExamDtos.SubmitRequest answers(Question q, String answer) {
         return new ExamDtos.SubmitRequest(Map.of(q.getId(), answer), 0);
     }

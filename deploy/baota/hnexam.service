@@ -1,0 +1,21 @@
+[Unit]
+Description=Huaneng Examination Application
+After=network.target mysqld.service redis.service
+
+[Service]
+Type=simple
+User=hnexam
+Group=hnexam
+WorkingDirectory=/opt/hnexam
+EnvironmentFile=/opt/hnexam/config/hnexam.env
+ExecStart=/usr/bin/java -Xms256m -Xmx1536m -XX:+UseG1GC -Dfile.encoding=UTF-8 -Duser.timezone=Asia/Shanghai -jar /opt/hnexam/current/app.jar
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=60
+SuccessExitStatus=143
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hnexam
+
+[Install]
+WantedBy=multi-user.target

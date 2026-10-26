@@ -28,7 +28,7 @@ public class ExamExpiryScheduler {
     @Scheduled(fixedDelayString = "${app.exams.expiry-check-ms:15000}", initialDelayString = "${app.exams.expiry-check-ms:15000}")
     public synchronized void autoSubmitExpired() {
         long started = System.nanoTime();
-        Instant cutoff = Instant.now();
+        Instant cutoff = Instant.now().minusSeconds(exams.submissionGraceSeconds());
         int size = Math.max(1, Math.min(batchSize, 500));
         for (int page = 0; page < Math.max(1, maxBatches); page++) {
             var ids = attempts.findExpiryCandidateIds(cutoff, afterId, PageRequest.of(0, size));

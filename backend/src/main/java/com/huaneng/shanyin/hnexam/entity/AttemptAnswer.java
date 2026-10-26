@@ -13,6 +13,8 @@ import lombok.Setter;
 @Setter
 @NoArgsConstructor
 public class AttemptAnswer {
+    private String shortScoringPolicyVersion;
+    private Long shortDecisionCacheId;
     private Long shortRubricId;
     private String shortReviewState;
     @Column(nullable=false,columnDefinition="boolean default false") private boolean shortSampleApproved;
@@ -59,7 +61,7 @@ public class AttemptAnswer {
     @Lob
     private String gradingComment;
 
-    // Reserved for the later AI-assisted grading phase. AI suggestions never become final scores directly.
+    // Keep the AI suggestion for audit even after automatic adoption or a manual override.
     private Integer aiSuggestedPoints;
 
     @Lob

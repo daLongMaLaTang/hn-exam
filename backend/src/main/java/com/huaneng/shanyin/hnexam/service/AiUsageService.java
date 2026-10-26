@@ -58,7 +58,7 @@ public class AiUsageService {
         if (length>maxInputChars) throw new AiCallLimitException("题目或作答超过AI处理长度，请人工复核");
     }
 
-    private record Admission(String leaseId, String rejection) {}
+    private record Admission(String leaseId, String rejection, boolean retryable) {}
     public String acquire(Long userId, int requestTimeoutSeconds) {
         if (userId==null || userId<=0) throw new IllegalArgumentException("AI调用缺少学员标识");
         Admission result=tx.execute(s -> {
@@ -68,13 +68,16 @@ public class AiUsageService {
             LocalDate day=now.atZone(DAY_ZONE).toLocalDate();
             var global=bucket(day,null); var user=bucket(day,userId);
             String rejection=null;
+            boolean retryable=false;
             if (global.getAdmitted()>=dailyCalls) rejection="今日AI总调用额度已用完，请人工复核";
             else if (user.getAdmitted()>=userDailyCalls) rejection="该学员今日AI调用额度已用完，请人工复核";
-            else if (leases.count()>=maxConcurrent || leases.countByUserId(userId)>=userMaxConcurrent)
+            else if (leases.count()>=maxConcurrent || leases.countByUserId(userId)>=userMaxConcurrent) {
                 rejection="AI正在处理其他作答，请稍后重试或人工复核";
+                retryable=true;
+            }
             if (rejection!=null) {
                 global.setRejected(global.getRejected()+1); user.setRejected(user.getRejected()+1);
-                return new Admission(null,rejection);
+                return new Admission(null,rejection,retryable);
             }
             global.setAdmitted(global.getAdmitted()+1); user.setAdmitted(user.getAdmitted()+1);
             var lease=new AiCallLease(); lease.setId(UUID.randomUUID().toString());
@@ -82,9 +85,9 @@ public class AiUsageService {
             // Grace period covers normal transport cancellation and completion bookkeeping.
             lease.setExpiresAt(now.plusSeconds(timeoutSeconds(requestTimeoutSeconds)+30L));
             leases.save(lease);
-            return new Admission(lease.getId(),null);
+            return new Admission(lease.getId(),null,false);
         });
-        if (result.rejection()!=null) throw new AiCallLimitException(result.rejection());
+        if (result.rejection()!=null) throw new AiCallLimitException(result.rejection(),result.retryable());
         return result.leaseId();
     }
 

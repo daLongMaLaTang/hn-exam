@@ -11,6 +11,9 @@ import lombok.Setter;
         name = "uk_personal_paper_question", columnNames = {"paper_id", "question_id"}))
 @Getter @Setter @NoArgsConstructor
 public class PersonalExamQuestion {
+    private Long shortRubricId;
+    @Lob private String shortScoringConfig;
+    private java.time.Instant shortLockedAt;
     @Id @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
