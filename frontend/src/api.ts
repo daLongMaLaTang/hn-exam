@@ -94,7 +94,8 @@ export async function api<T>(path: string, options: RequestInit & { timeoutMs?: 
   }
   if (!response.ok) {
     const body = await response.json().catch(() => ({})) as { message?: string }
-    if (response.status === 403 && (body as {code?: string}).code === 'PASSWORD_CHANGE_REQUIRED') window.location.href = '/account'
+    if (response.status === 403 && (body as {code?: string}).code === 'PASSWORD_CHANGE_REQUIRED'
+        && window.location.pathname !== '/account') window.location.href = '/account'
     throw new ApiError(body.message || `请求失败（${response.status}）`, response.status, (body as {code?: string}).code)
   }
   return await response.json() as T

@@ -1,10 +1,15 @@
 <script setup lang="ts">
 import { onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { api } from '../api'
+import { api, currentUser } from '../api'
 const route = useRoute(), count = ref<number | null>(null)
 let generation = 0
-async function load() { const request = ++generation; try { const result = await api<{unreadCount: number}>('/api/notifications'); if (request === generation) count.value = result.unreadCount } catch { if (request === generation) count.value = null } }
+async function load() {
+  const request = ++generation
+  if (currentUser()?.mustChangePassword || route.path.startsWith('/take/')) { count.value = null; return }
+  try { const result = await api<{unreadCount: number}>('/api/notifications'); if (request === generation) count.value = result.unreadCount }
+  catch { if (request === generation) count.value = null }
+}
 watch(() => route.fullPath, () => { if (!route.path.startsWith('/take/')) void load() }, { immediate: true })
 window.addEventListener('notifications-change', load)
 onBeforeUnmount(() => { generation++; window.removeEventListener('notifications-change', load) })

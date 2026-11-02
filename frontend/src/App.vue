@@ -24,10 +24,10 @@ function logout(){ signOut(); router.push('/login') }
     <a class="skip-link" href="#workspace-main">跳到主要内容</a>
     <header class="workspace-header">
       <RouterLink to="/" class="workspace-brand" aria-label="培训考试系统首页"><span class="workspace-mark" aria-hidden="true"><AppIcon name="questions" /></span><span><strong>培训考试系统</strong><small>TRAINING & EXAMINATION</small></span></RouterLink>
-      <div class="workspace-profile"><NotificationLink v-if="user?.roles.includes('CANDIDATE')" /><span class="avatar" aria-hidden="true">{{user?.name?.slice(0,1)}}</span><div><strong>{{user?.name}}</strong><small>{{isAdmin?'管理工作空间':'学习工作空间'}}</small></div><button class="link-button" @click="logout">退出登录</button></div>
+      <div class="workspace-profile"><NotificationLink v-if="user?.roles.includes('CANDIDATE') && !user.mustChangePassword" /><span class="avatar" aria-hidden="true">{{user?.name?.slice(0,1)}}</span><div><strong>{{user?.name}}</strong><small>{{isAdmin?'管理工作空间':'学习工作空间'}}</small></div><button class="link-button" @click="logout">退出登录</button></div>
     </header>
     <div class="workspace-nav-band"><nav class="workspace-nav" aria-label="主导航"><RouterLink v-for="item in navigation" :key="item.path" :to="item.path"><AppIcon :name="item.icon" /><span>{{item.label}}</span></RouterLink></nav></div>
     <main id="workspace-main" class="workspace-main" tabindex="-1"><router-view /></main>
-    <footer class="workspace-footer"><span>培训考试系统</span><span>学习有记录 · 考核有依据</span></footer>
+    <footer class="workspace-footer"><span>培训考试系统 · v1.1</span><span>学习有记录 · 考核有依据</span></footer>
   </div>
 </template>
