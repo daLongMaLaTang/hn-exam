@@ -25,7 +25,8 @@ const latestJobs = computed(() => ['GRADE', 'PREPARE'].map(kind => jobs.value.fi
 let pollTimer: ReturnType<typeof setTimeout> | undefined
 const drafts = ref<Record<string, Draft>>({}), confirmUndo = ref<Row | null>(null)
 const listTop = ref<HTMLElement | null>(null), confirmationPanel = ref<HTMLElement | null>(null)
-let disposed = false, initialized = false
+let disposed = false, initialized = false, loadSequence = 0
+const refreshing = ref(false)
 const labels: Record<string, string> = { NOT_STARTED: '待AI判卷', NEEDS_RUBRIC: '待AI判卷', STALE: '需重新AI判卷', RUNNING: 'AI判卷中', FAILED: 'AI判卷失败', SUGGESTED: '待人工确认', REVIEW_REQUIRED: '需单独复核', ACCEPTED: '已确认' }
 const verdicts: Record<string, string> = { FULL: '满足', NONE: '未满足', REVIEW: '无法确定', MET: '满足', PARTIAL: '部分满足', MISSING: '未答到', CONTRADICTED: '与要求相反', UNCERTAIN: '无法确定' }
 const key = (r: Row) => `${r.attemptId}-${r.questionId}`
@@ -60,16 +61,19 @@ function summary(r: Row) {
   const deductions = findings(r).filter(f => f.finding && !['MET', 'FULL'].includes(f.finding.verdict))
   return deductions.length ? deductions.slice(0, 2).map(f => `${f.point.label}：${f.finding!.reason}`).join('；') : '各评分点均满足。'
 }
-async function load(clearError = true): Promise<boolean> {
-  loading.value = true; if (clearError) error.value = ''
+async function load(clearError = true, background = false): Promise<boolean> {
+  const sequence = ++loadSequence
+  if (background) refreshing.value = true
+  else loading.value = true
+  if (clearError) error.value = ''
   try {
-    const [next, nextJobs] = await Promise.all([api<Workspace>(path), api<Job[]>(`${path}/jobs`)])
-    if (disposed) return false
+    const [next, nextJobs] = await Promise.all([api<Workspace>(path, { timeoutMs: 15000 }), api<Job[]>(`${path}/jobs`, { timeoutMs: 15000 })])
+    if (disposed || sequence !== loadSequence) return false
     data.value = next; jobs.value = nextJobs
     if (!initialized) { question.value = next.rows.length ? String(next.rows[0]!.questionId) : ''; initialized = true }
     return true
-  } catch (e) { if (!disposed) error.value = e instanceof Error ? e.message : '加载失败，请刷新重试'; return false }
-  finally { if (!disposed) loading.value = false }
+  } catch (e) { if (!disposed && sequence === loadSequence) error.value = e instanceof Error ? e.message : '加载失败，请刷新重试'; return false }
+  finally { if (!disposed && sequence === loadSequence) { loading.value = false; refreshing.value = false } }
 }
 async function generate() {
   if (busy.value || activeJob.value) return
@@ -91,9 +95,9 @@ function schedulePoll() {
   if (pollTimer) clearTimeout(pollTimer)
   if (disposed) return
   pollTimer = setTimeout(async () => {
-    if (!busy.value && !loading.value) {
+    if (!busy.value && !loading.value && !refreshing.value) {
       const before = data.value?.accepted
-      await load(false)
+      await load(false, true)
       if (before !== data.value?.accepted) emit('changed')
     }
     schedulePoll()
@@ -101,9 +105,11 @@ function schedulePoll() {
 }
 async function run(url: string, body: unknown, message: string, savedKey?: string) {
   if (busy.value || loading.value) return
+  ++loadSequence // Ignore any background response started before this save.
+  refreshing.value = false
   busy.value = true; error.value = ''; notice.value = ''; confirmUndo.value = null
   try {
-    await api(url, { method: 'POST', body: JSON.stringify(body) })
+    await api(url, { method: 'POST', body: JSON.stringify(body), timeoutMs: 30000 })
     if (disposed) return
     if (savedKey) delete drafts.value[savedKey]
     notice.value = message; await load(false); emit('changed')
@@ -127,6 +133,7 @@ onMounted(async () => { await load(); schedulePoll() })
 <template>
   <section v-if="loading || error || rows.length || jobs.length" class="panel short-review" aria-label="简答题集中判卷" :aria-busy="busy || loading">
     <header><div><h2>简答题集中判卷</h2><p>空答自动0分；有答案的由AI建议分 → 人工确认或改分 → 统一公布。</p></div><button class="secondary-button" :disabled="busy || loading" @click="load()">刷新简答</button></header>
+    <p v-if="busy" class="help" role="status">正在处理，请稍候…</p>
     <div v-if="error" class="notice error" role="alert">{{ error }}</div><div v-if="notice" class="notice" role="status">{{ notice }}</div>
     <p v-if="loading && !data">正在加载简答作答…</p>
     <template v-if="data">
