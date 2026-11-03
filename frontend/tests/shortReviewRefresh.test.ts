@@ -56,3 +56,19 @@ test('failed refresh releases state and failed save retains the draft and permit
   assert.equal(s.error.value, 'save failed')
 })
 
+
+test('confirming an AI score unlocks on write acknowledgement without waiting for a workspace reload', async () => {
+  const { state: s, requests: r } = harness()
+  const row = { attemptId: 1, questionId: 2, suggested: 4, awarded: null, revision: 1, state: 'SUGGESTED' }
+  s.data.value = { ...workspace(0), pending: 1, rows: [row] }
+  const save = s.acceptRows([row], false)
+  await s.acceptRows([row], false)
+  assert.equal(r.length, 1)
+  assert.equal(row.awarded, null)
+  r[0].resolve({ affected: 1 })
+  await save
+  assert.equal(r.length, 1)
+  assert.equal(row.awarded, 4)
+  assert.equal(s.busy.value, false)
+  assert.equal(s.data.value.pending, 0)
+})

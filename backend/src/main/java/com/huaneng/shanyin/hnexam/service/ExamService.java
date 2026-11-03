@@ -56,7 +56,7 @@ public class ExamService {
     public ExamDtos.Summary create(ExamDtos.SaveRequest request) {
         validate(request);
         Exam exam = new Exam();
-        apply(exam, request);
+        apply(exam, request, Set.of());
         return ExamDtos.Summary.from(examRepository.save(exam));
     }
 
@@ -96,10 +96,11 @@ public class ExamService {
         validate(request);
         Exam exam = lockExam(id);
         if (exam.getStatus() != ExamStatus.DRAFT) throw new IllegalStateException("只有草稿考试可以编辑");
+        var previous = exam.getQuestions().stream().map(q -> q.getQuestion().getId()).collect(Collectors.toSet());
         exam.getQuestions().clear();
         // Flush orphan removals before reinserting an existing question under its unique key.
         examRepository.flush();
-        apply(exam, request);
+        apply(exam, request, previous);
         return ExamDtos.Summary.from(exam);
     }
 
@@ -559,10 +560,12 @@ public class ExamService {
         if (r.title() == null || r.title().isBlank() || r.courseCode() == null || r.courseCode().isBlank() || r.questions() == null) throw new IllegalArgumentException("请填写考试名称和课程");
         if (!r.wrongQuestionPaper() && r.questions().isEmpty()) throw new IllegalArgumentException("普通试卷至少需要一道题");
         if (r.wrongQuestionPaper() && (r.wrongQuestionLimit() < 1 || r.wrongQuestionLimit() > 200)) throw new IllegalArgumentException("每人错题数量须为1至200道");
+        long uploadSize = r.questions().stream().map(ExamDtos.QuestionItem::paperData).filter(Objects::nonNull).mapToLong(String::length).sum();
+        if (uploadSize > 8400000) throw new IllegalArgumentException("每次上传试卷文件合计不能超过6 MB");
         if (r.questions().size() > 1000) throw new IllegalArgumentException("单份试卷最多1000题");
         if (r.durationMinutes() < 1 || r.durationMinutes() > 1440 || r.totalScore() < 1 || r.passScore() < 0 || r.maxAttempts() < 1 || r.maxAttempts() > 20) throw new IllegalArgumentException("考试参数不正确");
-        if (r.questions().stream().anyMatch(q -> q.questionId() == null || q.points() < 1 || q.position() < 1)) throw new IllegalArgumentException("试题分值和序号必须大于0");
-        if (r.questions().stream().map(ExamDtos.QuestionItem::questionId).distinct().count() != r.questions().size()) throw new IllegalArgumentException("试卷中不能重复添加同一道题");
+        if (r.questions().stream().anyMatch(q -> (q.questionId() == null && q.paperData() == null) || q.points() < 1 || q.position() < 1)) throw new IllegalArgumentException("试题分值和序号必须大于0");
+        if (r.questions().stream().map(ExamDtos.QuestionItem::questionId).filter(Objects::nonNull).distinct().count() != r.questions().stream().filter(q -> q.questionId() != null).count()) throw new IllegalArgumentException("试卷中不能重复添加同一道题");
         if (r.questions().stream().map(ExamDtos.QuestionItem::position).distinct().count() != r.questions().size()) throw new IllegalArgumentException("题目序号不能重复");
         long points = r.questions().stream().mapToLong(ExamDtos.QuestionItem::points).sum();
         if (!r.wrongQuestionPaper() && points != r.totalScore()) throw new IllegalArgumentException("各题分值合计必须等于试卷总分");
@@ -570,7 +573,7 @@ public class ExamService {
         if (r.startTime() != null && r.endTime() != null && !r.endTime().isAfter(r.startTime())) throw new IllegalArgumentException("结束时间必须晚于开始时间");
     }
 
-    private void apply(Exam e, ExamDtos.SaveRequest r) {
+    private void apply(Exam e, ExamDtos.SaveRequest r, Set<Long> previous) {
         e.setTitle(r.title().trim()); e.setCourseCode(r.courseCode().trim()); e.setDescription(r.description()); e.setDurationMinutes(r.durationMinutes());
         e.setChaptersJson(normalizeChapters(r.chapters())); e.setWrongQuestionPaper(r.wrongQuestionPaper());
         e.setWrongQuestionLimit(r.wrongQuestionLimit() < 1 ? 20 : r.wrongQuestionLimit());
@@ -585,17 +588,42 @@ public class ExamService {
         e.setShuffleQuestions(r.shuffleQuestions()); e.setBasicAntiCheat(r.basicAntiCheat());
         Set<String> scopedChapters = parseChapters(e.getChaptersJson());
         for (ExamDtos.QuestionItem requested : r.questions()) {
-            Question q = questionRepository.findById(requested.questionId()).orElseThrow(() -> new IllegalArgumentException("试题不存在：" + requested.questionId()));
+            Question q = requested.questionId() == null ? uploadedQuestion(requested, r.courseCode()) : questionRepository.findById(requested.questionId()).orElseThrow(() -> new IllegalArgumentException("试题不存在：" + requested.questionId()));
+            if (requested.questionId() != null && q.isExamOnly() && !previous.contains(q.getId()))
+                throw new IllegalArgumentException("上传试题仅限原试卷使用");
             ensureEligible(q);
             if (!r.courseCode().trim().equals(q.getCourseCode())) throw new IllegalArgumentException("试题 #" + q.getId() + " 不属于课程“" + r.courseCode().trim() + "”");
-            if (!scopedChapters.isEmpty() && !scopedChapters.contains(chapter(q))) throw new IllegalArgumentException("试题 #" + q.getId() + " 不在所选章节范围内");
+            if (!q.isExamOnly() && !scopedChapters.isEmpty() && !scopedChapters.contains(chapter(q))) throw new IllegalArgumentException("试题 #" + q.getId() + " 不在所选章节范围内");
             ExamQuestion item = new ExamQuestion();
             item.setExam(e); item.setQuestion(q); item.setPoints(requested.points()); item.setPosition(requested.position());
             e.getQuestions().add(item);
         }
     }
 
+    private Question uploadedQuestion(ExamDtos.QuestionItem item, String course) {
+        String data = item.paperData();
+        if (item.paperTitle() == null || item.paperTitle().isBlank() || data == null || course.trim().length()>64)
+            throw new IllegalArgumentException("请填写试题标题和课程（课程最多64字）");
+        int comma = data.indexOf(',');
+        if (comma < 0) throw new IllegalArgumentException("文件格式错误");
+        byte[] signature = switch (data.substring(0, comma)) {
+            case "data:application/pdf;base64" -> new byte[]{37,80,68,70,45};
+            case "data:image/png;base64" -> new byte[]{(byte)137,80,78,71,13,10,26,10};
+            case "data:image/jpeg;base64" -> new byte[]{(byte)255,(byte)216,(byte)255};
+            default -> throw new IllegalArgumentException("支持PDF、PNG和JPEG");
+        };
+        byte[] bytes = Base64.getDecoder().decode(data.substring(comma+1));
+        if (bytes.length > 6*1024*1024 || bytes.length < signature.length || !Arrays.equals(signature,Arrays.copyOf(bytes,signature.length)))
+            throw new IllegalArgumentException("文件内容或大小不符合要求");
+        Question q = new Question();
+        q.setExamOnly(true); q.setStatus(QuestionStatus.DISABLED); q.setType(QuestionType.CALCULATION);
+        q.setStem(item.paperTitle().trim()); q.setCourseCode(course.trim()); q.setAnswer("按卷面要求人工评分");
+        q.setOptionsJson("{\"paper\":\"" + data + "\"}");
+        return questionRepository.save(q);
+    }
+
     private void ensureEligible(Question q) {
+        if (q.isExamOnly() && !q.isDeleted()) return;
         if (q.getType() == QuestionType.FILL_BLANK) FillBlankGrading.validateReference(q.getAnswer());
         if (q.getStatus() != QuestionStatus.ACTIVE) throw new IllegalArgumentException("只能选用已启用的题目：" + q.getId());
         if (q.getAnswer() == null || q.getAnswer().isBlank()) throw new IllegalArgumentException("试题未设置正确答案：" + q.getId());

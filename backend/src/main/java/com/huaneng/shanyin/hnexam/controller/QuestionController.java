@@ -40,12 +40,21 @@ public class QuestionController {
     @GetMapping("/word-template")
     public ResponseEntity<byte[]> wordTemplate(){return ResponseEntity.ok().header(HttpHeaders.CONTENT_DISPOSITION,"attachment; filename=questions.docx")
             .contentType(MediaType.parseMediaType("application/vnd.openxmlformats-officedocument.wordprocessingml.document")).body(wordService.template());}
-    @GetMapping public List<QuestionDtos.AdminView> list() { return questionRepository.findAll().stream().filter(q -> !q.isDeleted()).map(QuestionDtos.AdminView::from).toList(); }
+    @GetMapping public List<QuestionDtos.AdminView> list() { return questionRepository.findByDeletedFalseAndExamOnlyFalse().stream().map(QuestionDtos.AdminView::from).toList(); }
+    @DeleteMapping("/{id}") @Transactional
+    @PreAuthorize("hasAnyAuthority('SYSTEM_ADMIN','TRAINING_ADMIN')")
+    public java.util.Map<String,Integer> deleteQuestion(@PathVariable Long id) {
+        var question = questionRepository.findById(id).filter(q -> !q.isDeleted() && !q.isExamOnly())
+                .orElseThrow(() -> new IllegalArgumentException("题库中没有这道题"));
+        question.setDeleted(true);
+        question.setStatus(QuestionStatus.DISABLED);
+        return java.util.Map.of("deleted", 1);
+    }
     public record DeleteCourse(@jakarta.validation.constraints.NotBlank String courseCode) {}
     @DeleteMapping("/course") @Transactional
     @PreAuthorize("hasAnyAuthority('SYSTEM_ADMIN','TRAINING_ADMIN')")
     public java.util.Map<String, Integer> deleteCourse(@Valid @RequestBody DeleteCourse request) {
-        var bank = questionRepository.findAll().stream().filter(q -> !q.isDeleted() && q.getCourseCode().equals(request.courseCode())).toList();
+        var bank = questionRepository.findByDeletedFalseAndExamOnlyFalse().stream().filter(q -> q.getCourseCode().equals(request.courseCode())).toList();
         if (bank.isEmpty()) throw new IllegalArgumentException("该课程题库不存在或已删除");
         bank.forEach(q -> { q.setDeleted(true); q.setStatus(QuestionStatus.DISABLED); });
         return java.util.Map.of("deleted", bank.size());
@@ -59,7 +68,7 @@ public class QuestionController {
     }
     @PatchMapping("/{id}/status") public QuestionDtos.AdminView status(@PathVariable Long id, @RequestParam QuestionStatus status) {
         Question question = questionRepository.findById(id).orElseThrow(() -> new IllegalArgumentException("试题不存在"));
-        if (question.isDeleted()) throw new IllegalStateException("所属课程题库已删除");
+        if (question.isExamOnly() || question.isDeleted()) throw new IllegalStateException("所属课程题库已删除");
         if (status == QuestionStatus.ACTIVE) validateForUse(question.getType(), question.getAnswer(), question.getOptionsJson());
         question.setStatus(status); return QuestionDtos.AdminView.from(questionRepository.save(question));
     }
@@ -68,7 +77,7 @@ public class QuestionController {
         if (request.chapter() == null || request.chapter().isBlank()) throw new IllegalArgumentException("请填写章节名称");
         List<Question> selected = questionRepository.findAllById(request.questionIds());
         if (selected.size() != request.questionIds().size()) throw new IllegalArgumentException("包含不存在的试题");
-        if (selected.stream().anyMatch(Question::isDeleted)) throw new IllegalStateException("包含已删除题库的试题");
+        if (selected.stream().anyMatch(q -> q.isExamOnly() || q.isDeleted())) throw new IllegalStateException("包含已删除题库的试题");
         String chapter = request.chapter().trim();
         selected.forEach(question -> question.setChapter(chapter));
         return questionRepository.saveAll(selected).stream().map(QuestionDtos.AdminView::from).toList();
@@ -86,7 +95,7 @@ public class QuestionController {
                 .body(excelService.template());
     }
     private void apply(Question q, QuestionDtos.SaveRequest r) {
-        if (q.isDeleted()) throw new IllegalStateException("所属课程题库已删除");
+        if (q.isExamOnly() || q.isDeleted()) throw new IllegalStateException("所属课程题库已删除");
         validateForUse(r.type(), r.answer(), r.optionsJson());
         q.setType(r.type()); q.setStem(r.stem()); q.setAnswer(r.answer()); q.setOptionsJson(r.optionsJson());
         q.setExplanation(r.explanation()); q.setStatus(r.status() == null ? QuestionStatus.PENDING_REVIEW : r.status());

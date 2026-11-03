@@ -149,7 +149,7 @@ public class ShortAnswerReviewService {
                 if(boundary && v.getAwardedPoints()==null) warning.add("可能影响及格结果，请单独复核");
                 String sample=POLICY.equals(v.getShortScoringPolicyVersion())?"AI建议分，须人工确认最终分":sampleMessage(all,q.questionId(),v.getShortRubricId());
                 if(v.getAwardedPoints()==null && sample.startsWith("本题抽查发现改分")) warning.add("本题存在人工改分，请重点复核");
-                boolean eligible=state.equals("SUGGESTED") && warning.isEmpty() && sample.startsWith("抽查已完成");
+                boolean eligible=state.equals("SUGGESTED") && warning.isEmpty() && POLICY.equals(v.getShortScoringPolicyVersion());
                 rows.add(new Row(a.getId(),q.questionId(),a.getUser().getName(),q.stem(),q.reference(),Objects.toString(v.getAnswerText(),""),q.points(),state,v.getAiSuggestedPoints(),v.getAwardedPoints(),v.getAiSuggestedSimilarity(),v.getShortRevision(),used==null?null:used.getId(),used==null || used.getRubricJson()==null?null:standards.decode(used),result(v),warning,eligible,sample,a.getStatus()==AttemptStatus.GRADED,
                         "SHORT_EMPTY_ZERO".equals(v.getAiStatus()),state.equals("SUGGESTED") && warning.isEmpty(),v.getGradingComment(),current==null?null:current.getId()));
             }
@@ -189,7 +189,8 @@ public class ShortAnswerReviewService {
         if(request==null || request.targets()==null || request.targets().isEmpty() || request.targets().size()>1000 || (request.individuallyReviewed()&&request.targets().size()!=1)) throw new IllegalArgumentException("请选择评分记录；疑难答案须逐份确认");
         if(request.targets().stream().anyMatch(t->t==null||t.attemptId()==null||t.questionId()==null) || request.targets().stream().map(t->t.attemptId()+":"+t.questionId()).distinct().count()!=request.targets().size()) throw new IllegalArgumentException("评分记录重复或无效");
         lockExam(examId);
-        var all=attempts.findByExamIdOrderByStartedAtDesc(examId);
+        if ((ordinaryOnly || request.targets().size()>1) && em.createQuery("select count(j) from ShortAnswerJob j where j.examId=:id and j.kind='GRADE'", Long.class)
+                .setParameter("id", examId).getSingleResult() == 0) throw new IllegalStateException("请先AI一键判卷");
         for(var target:request.targets().stream().sorted(Comparator.comparing(Target::attemptId).thenComparing(Target::questionId)).toList()) {
             var a=lock(target.attemptId());allowed(a,examId,false);var q=item(a,target.questionId());var v=answer(a,q.questionId());revision(v,target);
             if(v.getAwardedPoints()!=null || !Set.of("SUGGESTED","REVIEW_REQUIRED").contains(Objects.toString(v.getShortReviewState(),""))) throw new IllegalStateException("请选择尚未确认的有效AI建议");

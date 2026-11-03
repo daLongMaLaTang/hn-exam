@@ -8,7 +8,8 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import java.util.List;
 
 public interface QuestionRepository extends JpaRepository<Question, Long> {
-    long countByDeletedFalse();
+    long countByDeletedFalseAndExamOnlyFalse();
+    List<Question> findByDeletedFalseAndExamOnlyFalse();
     long countByStatus(QuestionStatus status);
     long countByType(QuestionType type);
     List<Question> findByStatusOrderByIdDesc(QuestionStatus status);

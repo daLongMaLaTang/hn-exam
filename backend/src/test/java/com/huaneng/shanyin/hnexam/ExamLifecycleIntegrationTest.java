@@ -851,6 +851,24 @@ class ExamLifecycleIntegrationTest {
         mvc.perform(get("/api/questions")).andExpect(jsonPath("$[?(@.id == "+q.getId()+")]").isEmpty());
     }
 
+    @Test @WithMockUser(authorities="SYSTEM_ADMIN") void externalPaperAndSingleDeletion() throws Exception {
+        var u = user();
+        String image = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jxNYAAAAASUVORK5CYII=";
+        var request = new ExamDtos.SaveRequest("力学", "物理", List.of(), "", 30, 10, 6, null, null, false, 1, false, false, false, 20,
+                List.of(new ExamDtos.QuestionItem(null, 10, 1, "看图计算", image)));
+        Long exam = service.create(request).id();
+        var item = service.detail(exam).questions().get(0);
+        assertThat(item.paperTitle()).isEqualTo("看图计算");
+        mvc.perform(get("/api/questions")).andExpect(jsonPath("$[?(@.id == "+item.questionId()+")]").isEmpty());
+        service.publish(exam);
+        assertThat(service.start(exam,u.getEmployeeNo()).questions().get(0).optionsJson()).contains(image);
+        var one = question(QuestionType.SINGLE_CHOICE);
+        var other = question(QuestionType.SINGLE_CHOICE);
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete("/api/questions/"+one.getId())).andExpect(status().isOk());
+        assertThat(questions.findById(one.getId()).orElseThrow().isDeleted()).isTrue();
+        assertThat(questions.findById(other.getId()).orElseThrow().isDeleted()).isFalse();
+    }
+
     @Autowired PracticeDayRepository practiceDays;
     @Test @WithMockUser(authorities="SYSTEM_ADMIN") void monthlyRanksAllUsersAndExcludesDailyFromExamResolutionRate() throws Exception {
         var fast=user();var slow=user();

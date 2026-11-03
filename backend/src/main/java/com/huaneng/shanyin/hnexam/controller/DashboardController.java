@@ -74,7 +74,7 @@ public class DashboardController {
         }
         return Map.of(
                 "userCount", userRepository.findAll().stream().filter(privateAdmins::visible).count(),
-                "questionCount", questionRepository.countByDeletedFalse(),
+                "questionCount", questionRepository.countByDeletedFalseAndExamOnlyFalse(),
                 "pendingQuestionCount", questionRepository.countByStatus(QuestionStatus.PENDING_REVIEW),
                 "activeQuestionCount", questionRepository.countByStatus(QuestionStatus.ACTIVE),
                 "examCount", exams.count(), "gradedCount", attempts.countByStatusAndExamStatusNot(AttemptStatus.GRADED, com.huaneng.shanyin.hnexam.domain.ExamStatus.CANCELLED),

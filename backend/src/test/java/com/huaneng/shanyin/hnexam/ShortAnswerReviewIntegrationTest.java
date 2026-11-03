@@ -82,6 +82,15 @@ class ShortAnswerReviewIntegrationTest {
         assertThat(answer(a).getGradingMethod()).isNull();assertThat(answer(a).getCorrect()).isNull();
     }
     void confirm(Long e,Long a) {review.applySuggestions(e,new ApplySuggestions(List.of(target(row(e,a)))),"admin");}
+    @Test void bulkApplyRequiresGradingJobAndSavesEligibleScores() {
+        var q=question(); Long e=exam(q), a=submit(e,q,"甲",0), b=submit(e,q,"甲",1);
+        assertThatThrownBy(()->review.applySuggestions(e,new ApplySuggestions(List.of(target(row(e,a))),true),"admin"))
+                .hasMessageContaining("请先AI一键判卷");
+        jobs.start(e,"admin"); drain();
+        assertThat(review.applySuggestions(e,new ApplySuggestions(List.of(target(row(e,a)),target(row(e,b))),true),"admin")).isEqualTo(2);
+        assertThat(row(e,a).awarded()).isEqualTo(3);
+        assertThat(row(e,b).awarded()).isEqualTo(3);
+    }
     @Test void aiSuggestionsRequireHumanConfirmationBeforePublication() {
         var q=question();Long e=exam(q),a=submit(e,q,"甲",0);
         verifyNoInteractions(provider);

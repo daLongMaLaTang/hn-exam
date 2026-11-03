@@ -16,7 +16,9 @@ import java.util.Map;
 public final class ExamDtos {
     private ExamDtos() {}
 
-    public record QuestionItem(@NotNull Long questionId, @Min(1) int points, @Min(1) int position) {}
+    public record QuestionItem(Long questionId, @Min(1) int points, @Min(1) int position, @Size(max=200) String paperTitle, @Size(max=8400000) String paperData) {
+        public QuestionItem(Long questionId, int points, int position) { this(questionId, points, position, null, null); }
+    }
 
     public record SaveRequest(
             @NotBlank @Size(max = 160) String title,
@@ -100,7 +102,7 @@ public final class ExamDtos {
                     e.getPassScore(), e.getStartTime(), e.getEndTime(), e.getStatus(), false,
                     1, e.isShuffleQuestions(), e.isBasicAntiCheat(), parseChapters(e), e.isWrongQuestionPaper(),
                     e.getWrongQuestionLimit(), e.getPersonalPapers().size(), e.getQuestions().stream()
-                    .map(q -> new QuestionItem(q.getQuestion().getId(), q.getPoints(), q.getPosition())).toList(),
+                    .map(q -> new QuestionItem(q.getQuestion().getId(), q.getPoints(), q.getPosition(), q.getQuestion().isExamOnly() ? q.getQuestion().getStem() : null, null)).toList(),
                     e.isAllWrongQuestions(), e.getAudienceMode() == null ? "ALL" : e.getAudienceMode(),
                     java.util.Set.copyOf(e.getAudienceUserIds()), java.util.Set.copyOf(e.getAudienceMajors()), e.getMakeupSourceExamId());
         }

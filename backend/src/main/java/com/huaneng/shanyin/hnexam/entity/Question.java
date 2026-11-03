@@ -15,6 +15,8 @@ import lombok.Setter;
 public class Question {
     @Column(nullable = false, columnDefinition = "boolean default false")
     private boolean deleted;
+    @Column(nullable = false, columnDefinition = "boolean default false")
+    private boolean examOnly;
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;

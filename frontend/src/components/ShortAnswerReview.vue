@@ -8,7 +8,7 @@ type Row = {
   maximum: number; state: string; suggested: number | null; awarded: number | null; revision: number
   rubricId: number | null; currentRubricId: number | null; rubric: { points: Point[] } | null
   evaluation: { findings: Finding[]; strictness?: string; referenceScore?: { points: number; reason: string; evidence: string } | null } | null
-  risks: string[]; safeToApply: boolean; published: boolean; automaticZero: boolean; gradingComment: string | null
+  risks: string[]; safeToApply: boolean; batchEligible: boolean; published: boolean; automaticZero: boolean; gradingComment: string | null
 }
 type Workspace = { rows: Row[]; pending: number; suggested: number; reviewRequired: number; accepted: number }
 type Draft = { points: number | ''; reason: string; revision: number }
@@ -101,7 +101,7 @@ function schedulePoll() {
       if (before !== data.value?.accepted) emit('changed')
     }
     schedulePoll()
-  }, 4000)
+  }, jobs.value.some(job => job.pending > 0) ? 4000 : 20000)
 }
 async function run(url: string, body: unknown, message: string, savedKey?: string) {
   if (busy.value || loading.value) return
@@ -116,8 +116,35 @@ async function run(url: string, body: unknown, message: string, savedKey?: strin
   } catch (e) { if (!disposed) { await load(false); error.value = e instanceof Error ? e.message : '保存失败，输入已保留，请刷新后重试' } }
   finally { if (!disposed) busy.value = false }
 }
-function applySuggestions(list: Row[], ordinaryOnly = false) {
-  if (list.length) void run(`${path}/apply-suggestions`, { targets: list.map(target), ordinaryOnly }, `已人工确认 ${list.length} 份AI建议分，待统一公布。`)
+async function acceptRows(list: Row[], bulk: boolean) {
+  if (busy.value || loading.value || confirmUndo.value || !list.length || !data.value) return
+  ++loadSequence
+  refreshing.value = false
+  busy.value = true
+  error.value = ''; notice.value = ''
+  try {
+    await api(path + '/apply-suggestions', { method: 'POST', timeoutMs: 60000, body: JSON.stringify({targets:list.map(target), ordinaryOnly:bulk}) })
+    for (const row of list) {
+      row.awarded = row.suggested
+      row.state = 'ACCEPTED'
+      row.revision++
+      delete drafts.value[key(row)]
+    }
+    data.value.pending -= list.length
+    data.value.accepted += list.length
+    notice.value = `已确认 ${list.length} 份建议分，待统一公布。`
+    emit('changed')
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : '确认失败，请核对最新状态'
+    await load(false)
+  } finally { busy.value = false }
+}
+function applyAll() {
+  if (!jobs.value.some(j => j.kind === 'GRADE')) return window.alert('请先AI一键判卷')
+  const eligible = rows.value.filter(r => r.awarded == null && r.batchEligible)
+  if (!eligible.length) return window.alert('当前没有可批量应用的建议分')
+  const batch = eligible.slice(0, 1000)
+  if (window.confirm(`将为本场考试 ${batch.length} 份作答确认AI建议分（跨题目）。疑难答案保留人工复核。继续吗？`)) void acceptRows(batch,true)
 }
 function saveManual(r: Row) {
   const input = draft(r)
@@ -140,7 +167,7 @@ onMounted(async () => { await load(); schedulePoll() })
       <div class="summary"><strong>{{ data.pending }} 份待人工确认</strong><span>{{ emptyCount }} 份空答自动0分</span><span>{{ data.accepted - emptyCount }} 份已人工确认</span><span>{{ data.reviewRequired }} 份需重点复核</span></div>
       <div ref="listTop" class="filters"><label>按题目集中查看<select v-model="question" @change="page = 1"><option value="">全部简答题</option><option v-for="[id, stem] in questions" :key="id" :value="String(id)">#{{ id }} {{ stem.slice(0, 45) }}</option></select></label><label>评分状态<select v-model="filter" @change="page = 1"><option value="pending">待人工确认</option><option value="review">需重点复核</option><option value="failed">AI评阅失败</option><option value="accepted">已确认 / 空答0分</option><option value="all">全部作答</option></select></label></div>
       <div class="batch-bar">
-        <div class="actions batch-actions"><button class="primary-button" :disabled="busy || loading || !!activeJob || !toGenerate.length || !!confirmUndo" @click="generate">{{ activeJob ? (activeJob.executionEnabled ? '后台判卷进行中' : '等待后台启用') : 'AI一键判卷（' + toGenerate.length + '）' }}</button></div>
+        <div class="actions batch-actions"><button class="primary-button" :disabled="busy || loading || !!activeJob || !toGenerate.length || !!confirmUndo" @click="generate">{{ activeJob ? (activeJob.executionEnabled ? '后台判卷进行中' : '等待后台启用') : 'AI一键判卷（' + toGenerate.length + '）' }}</button><button class="secondary-button" :disabled="busy || loading || !!confirmUndo" @click="applyAll">一键应用AI建议分</button></div>
         <p class="help">按要点宽松给分，同义和概括表达均认可。AI建议仅供核对，每份有答案的作答都须人工确认；已有建议和人工最终分会保留。</p>
         <div v-for="job in latestJobs" :key="job.id" class="notice" role="status">
           <strong>{{ job.kind === 'PREPARE' ? '准备评分标准' : 'AI建议生成' }}</strong> · 已完成 {{ job.completed }} / {{ job.total }}
@@ -158,7 +185,7 @@ onMounted(async () => { await load(); schedulePoll() })
         <div class="answer-compare"><div><small>参考答案</small><p>{{ r.reference }}</p></div><div class="candidate-answer"><small>考生作答</small><p>{{ r.answer.trim() || '未作答' }}</p></div></div>
         <div v-if="r.automaticZero" class="score-line"><strong>得分 0 / {{ r.maximum }} 分</strong><span class="help">未作答，系统自动记0分，无需AI或人工确认。</span></div>
         <template v-else>
-          <div class="score-line"><span v-if="!hasSuggestion(r) && r.awarded == null" class="help">{{ r.state === 'STALE' ? '评分标准已更新，请重新AI判卷。' : r.state === 'FAILED' ? 'AI判卷失败，未计分；可重试或人工评分。' : '尚无AI建议，可点击“AI一键判卷”或直接人工评分。' }}</span><button v-if="hasSuggestion(r) && r.safeToApply" class="secondary-button" :disabled="busy || loading || !!confirmUndo" @click="applySuggestions([r])">确认此分：{{ r.suggested }}分</button></div>
+          <div class="score-line"><span v-if="!hasSuggestion(r) && r.awarded == null" class="help">{{ r.state === 'STALE' ? '评分标准已更新，请重新AI判卷。' : r.state === 'FAILED' ? 'AI判卷失败，未计分；可重试或人工评分。' : '尚无AI建议，可点击“AI一键判卷”或直接人工评分。' }}</span><button v-if="hasSuggestion(r) && r.safeToApply" class="secondary-button" :disabled="busy || loading || !!confirmUndo" @click="acceptRows([r], false)">确认此分：{{ r.suggested }}分</button></div>
           <p v-if="r.evaluation && r.state !== 'STALE'" class="ai-summary">{{ summary(r) }}</p>
           <ul v-if="r.risks.length && r.awarded == null" class="risk-list"><li v-for="risk in r.risks" :key="risk">{{ risk }}</li></ul>
           <form v-if="r.awarded == null" class="manual" @submit.prevent="saveManual(r)"><div class="manual-line"><div class="ai-score" aria-label="AI建议分"><span>AI建议分</span><strong>{{ r.state === 'STALE' ? '已过期' : r.suggested ?? '—' }}</strong><span>/ {{ r.maximum }} 分</span><small v-if="r.suggested != null">{{ r.evaluation?.referenceScore ? '历史参考答案建议' : '逐点评分' }}</small></div><div class="manual-score"><label :for="'score-' + key(r)">人工最终分</label><div class="score-input"><input :id="'score-' + key(r)" v-model.number="draft(r).points" type="number" min="0" :max="r.maximum" step="1" required :placeholder="'0～' + r.maximum" :disabled="busy || loading" /><span>/ {{ r.maximum }} 分</span></div></div><button class="secondary-button" :disabled="busy || loading || !!confirmUndo">{{ hasSuggestion(r) ? '修改并确认' : '确认人工评分' }}</button></div><details><summary>添加改分说明（可选）</summary><label :for="'reason-' + key(r)" class="sr-only">改分说明</label><textarea :id="'reason-' + key(r)" v-model="draft(r).reason" rows="2" maxlength="2000" placeholder="可说明得分或扣分依据" :disabled="busy || loading" /></details><p v-if="draft(r).revision !== r.revision" class="rubric-note">此作答已更新，输入暂未保存。<button type="button" class="link-button" @click="delete drafts[key(r)]">清空输入并使用最新记录</button></p></form>
