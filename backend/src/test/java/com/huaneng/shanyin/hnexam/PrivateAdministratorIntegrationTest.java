@@ -49,6 +49,26 @@ class PrivateAdministratorIntegrationTest {
         mvc.perform(get("/api/auth/me").with(as(hidden))).andExpect(jsonPath("$.canManageSystem").value(true));
         mvc.perform(get("/api/auth/me").with(as(normal))).andExpect(jsonPath("$.canManageSystem").value(false));
     }
+    @Test void recoveryIsPrivateAndRequiresOneAdminDecision() throws Exception {
+        var u=new AppUser(); u.setEmployeeNo("recover"+UUID.randomUUID().toString().substring(0,8)); u.setName("学员");
+        u.setPasswordHash(encoder.encode("before")); u.setMustChangePassword(false);
+        u.getRoles().add(roles.findByCode("CANDIDATE").orElseThrow()); users.save(u);
+        String base="/api/users/password-requests";
+        String body=json.writeValueAsString(Map.of("employeeNo",u.getEmployeeNo(),"name",u.getName()));
+        for (int cycle=0;cycle<2;cycle++) {
+            for(int i=0;i<2;i++) mvc.perform(post("/api/auth/password-recovery").contentType("application/json").content(body)).andExpect(status().isOk());
+            var list=json.readTree(mvc.perform(get(base).with(as(normal))).andExpect(status().isOk()).andReturn().getResponse().getContentAsByteArray());
+            assertThat(list.size()).isEqualTo(1);
+            String url=base+"/"+list.get(0).get("id").asLong()+"/"+(cycle==0?"reject":"approve");
+            mvc.perform(post(url).with(jwt().jwt(j->j.subject(u.getEmployeeNo())).authorities(new SimpleGrantedAuthority("CANDIDATE")))).andExpect(status().isForbidden());
+            mvc.perform(post(url).with(as(normal))).andExpect(status().isOk());
+            mvc.perform(post(url).with(as(normal))).andExpect(status().isConflict());
+            var updated=users.findById(u.getId()).orElseThrow();
+            assertThat(updated.getAuthVersion()).isEqualTo(cycle);
+            assertThat(updated.isMustChangePassword()).isEqualTo(cycle==1);
+            assertThat(encoder.matches("before",updated.getPasswordHash())).isEqualTo(cycle==0);
+        }
+    }
     @Test void directoryAndDirectIdsHidePrivateAccounts() throws Exception {
         String list=mvc.perform(get("/api/users").with(as(normal))).andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
         assertThat(list).contains(normal.getEmployeeNo()).doesNotContain(hidden.getEmployeeNo());
