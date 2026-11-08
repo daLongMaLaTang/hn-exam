@@ -69,8 +69,10 @@ class PrivateAdministratorIntegrationTest {
         var q=questions.findById(questionId).orElseThrow(); q.setAnswer("修改后的答案"); questions.save(q);
         mvc.perform(get("/api/private-exams/html").with(as(normal))).andExpect(status().isForbidden());
         mvc.perform(get("/api/private-exams/html").with(jwt().jwt(j->j.subject(candidate.getEmployeeNo())).authorities(new SimpleGrantedAuthority("CANDIDATE")))).andExpect(status().isForbidden());
+        long auditCount = audit.count();
         String html=mvc.perform(get("/api/private-exams/html").param("examId",String.valueOf(examId)).with(as(hidden)))
                 .andExpect(status().isOk()).andReturn().getResponse().getContentAsString(java.nio.charset.StandardCharsets.UTF_8);
+        assertThat(audit.count()).isEqualTo(auditCount);
         assertThat(html).contains("正确选项","快照题干&lt;script&gt;").doesNotContain("修改后的答案","<script>");
     }
     @Autowired ExamRepository examRepository;
