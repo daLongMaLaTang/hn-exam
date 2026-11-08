@@ -15,6 +15,13 @@ public class ExamController {
     private final ExamService examService;
     private final com.huaneng.shanyin.hnexam.service.PrivateAdministratorPolicy privateAdmins;
     private final com.huaneng.shanyin.hnexam.repository.UserRepository users;
+    private final com.huaneng.shanyin.hnexam.service.QuestionExcelService excelService;
+    @PostMapping(value="/exams/import-excel", consumes="multipart/form-data")
+    @PreAuthorize("hasAnyAuthority('SYSTEM_ADMIN','DEPARTMENT_LEADER','TRAINING_ADMIN','SPECIALIST')")
+    public com.huaneng.shanyin.hnexam.service.QuestionExcelService.ImportResult importExcel(
+            @RequestPart("file") org.springframework.web.multipart.MultipartFile file, @RequestParam String courseCode) {
+        return excelService.importWorkbook(file, courseCode);
+    }
     public record AudienceOption(Long id, String employeeNo, String name, String professionalDirection) {}
     @GetMapping("/exams/audience-options") @PreAuthorize("hasAnyAuthority('SYSTEM_ADMIN','DEPARTMENT_LEADER','TRAINING_ADMIN','SPECIALIST')")
     public List<AudienceOption> audienceOptions() {

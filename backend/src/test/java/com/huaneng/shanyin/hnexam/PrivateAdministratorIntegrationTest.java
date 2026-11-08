@@ -41,6 +41,59 @@ class PrivateAdministratorIntegrationTest {
     org.springframework.test.web.servlet.request.RequestPostProcessor as(AppUser user) {
         return jwt().jwt(j -> j.subject(user.getEmployeeNo())).authorities(new SimpleGrantedAuthority("SYSTEM_ADMIN"));
     }
+    @Autowired ExamService examService;
+    @Autowired QuestionRepository questions;
+    @Test void excelExamCanBePublishedGradedAndExportedOnlyByPrivateAdmin() throws Exception {
+        byte[] bytes;
+        try (var book = new org.apache.poi.xssf.usermodel.XSSFWorkbook(); var output = new java.io.ByteArrayOutputStream()) {
+            var sheet = book.createSheet("题库导入");
+            String[][] rows = {{"课程","题型","题干","选项A","选项B","答案"},
+                    {"导入验证","单选题","快照题干<script>","正确选项","错误选项","A"},
+                    {"其他课程","判断题","错误课程","","","正确"}};
+            for (int i=0;i<rows.length;i++) { var row=sheet.createRow(i); for(int j=0;j<rows[i].length;j++) row.createCell(j).setCellValue(rows[i][j]); }
+            book.write(output); bytes=output.toByteArray();
+        }
+        var file = new org.springframework.mock.web.MockMultipartFile("file","exam.xlsx","application/octet-stream",bytes);
+        var response=mvc.perform(multipart("/api/exams/import-excel").file(file).param("courseCode","导入验证").with(as(normal)))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.success").value(1)).andExpect(jsonPath("$.failed").value(1)).andReturn();
+        long questionId=json.readTree(response.getResponse().getContentAsByteArray()).get("questionIds").get(0).asLong();
+        var request=new com.huaneng.shanyin.hnexam.dto.ExamDtos.SaveRequest("导入考试验证","导入验证",List.of(),"",60,100,60,null,null,false,1,false,false,false,20,
+                List.of(new com.huaneng.shanyin.hnexam.dto.ExamDtos.QuestionItem(questionId,100,1)));
+        long examId=examService.create(request).id();
+        var candidate=create("student_"+UUID.randomUUID().toString().substring(0,8),false);
+        candidate.getRoles().clear(); candidate.getRoles().add(roles.findByCode("CANDIDATE").orElseThrow()); users.save(candidate);
+        examService.publish(examId,hidden.getEmployeeNo());
+        var attempt=examService.start(examId,candidate.getEmployeeNo());
+        var grade=examService.submitAcknowledged(attempt.attemptId(),candidate.getEmployeeNo(),new com.huaneng.shanyin.hnexam.dto.ExamDtos.SubmitRequest(Map.of(questionId,"正确选项"),0),java.time.Instant.now());
+        assertThat(grade.grade().score()).isEqualTo(100);
+        var q=questions.findById(questionId).orElseThrow(); q.setAnswer("修改后的答案"); questions.save(q);
+        mvc.perform(get("/api/private-exams/html").with(as(normal))).andExpect(status().isForbidden());
+        mvc.perform(get("/api/private-exams/html").with(jwt().jwt(j->j.subject(candidate.getEmployeeNo())).authorities(new SimpleGrantedAuthority("CANDIDATE")))).andExpect(status().isForbidden());
+        String html=mvc.perform(get("/api/private-exams/html").param("examId",String.valueOf(examId)).with(as(hidden)))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString(java.nio.charset.StandardCharsets.UTF_8);
+        assertThat(html).contains("正确选项","快照题干&lt;script&gt;").doesNotContain("修改后的答案","<script>");
+    }
+    @Autowired ExamRepository examRepository;
+    @Autowired PersonalExamPaperRepository paperRepository;
+    @Autowired org.springframework.transaction.support.TransactionTemplate transaction;
+    @Test void archiveIncludesPersonalSnapshotsAttachmentsAndClosedExamsButExcludesDrafts() throws Exception {
+        long id=transaction.execute(status -> {
+            var q=new Question(); q.setType(com.huaneng.shanyin.hnexam.domain.QuestionType.CALCULATION);
+            q.setStem("附件题"); q.setAnswer("参考步骤"); q.setCourseCode("验证");
+            q.setOptionsJson("{\"paper\":\"data:application/pdf;base64,JVBERi0=\"}"); questions.save(q);
+            var exam=new Exam(); exam.setTitle("个人历史试卷"); exam.setWrongQuestionPaper(true);
+            exam.setStatus(com.huaneng.shanyin.hnexam.domain.ExamStatus.CLOSED); examRepository.save(exam);
+            var paper=new PersonalExamPaper(); paper.setExam(exam); paper.setUser(normal);
+            var item=new PersonalExamQuestion(); item.setPaper(paper); item.setQuestion(q); item.setPoints(100); item.setPosition(1); item.captureSnapshot();
+            paper.getQuestions().add(item); paperRepository.save(paper);
+            var draft=new Exam(); draft.setTitle("不应导出的草稿"); examRepository.save(draft);
+            return exam.getId();
+        });
+        String html=mvc.perform(get("/api/private-exams/html").with(as(hidden))).andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString(java.nio.charset.StandardCharsets.UTF_8);
+        assertThat(html).contains("个人历史试卷","参考步骤","data:application/pdf;base64,JVBERi0=",normal.getEmployeeNo())
+                .doesNotContain("不应导出的草稿");
+    }
     @Test void loginUsesNormalPasswordAndOwnerCapability() throws Exception {
         mvc.perform(post("/api/auth/login").contentType("application/json").content(json.writeValueAsString(Map.of("employeeNo",hidden.getEmployeeNo(),"password","TestingOnly123!"))))
             .andExpect(status().isOk()).andExpect(jsonPath("$.canManageSystem").value(true));

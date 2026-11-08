@@ -28,6 +28,6 @@ function logout(){ signOut(); router.push('/login') }
     </header>
     <div class="workspace-nav-band"><nav class="workspace-nav" aria-label="主导航"><RouterLink v-for="item in navigation" :key="item.path" :to="item.path"><AppIcon :name="item.icon" /><span>{{item.label}}</span></RouterLink></nav></div>
     <main id="workspace-main" class="workspace-main" tabindex="-1"><router-view /></main>
-    <footer class="workspace-footer"><span>培训考试系统 · v1.4</span><span>学习有记录 · 考核有依据</span></footer>
+    <footer class="workspace-footer"><span>培训考试系统 · v1.5</span><span>学习有记录 · 考核有依据</span></footer>
   </div>
 </template>

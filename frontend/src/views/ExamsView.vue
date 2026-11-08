@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
-import { api, hasRole } from '../api'
+import { api, hasRole, currentUser } from '../api'
 import ExamAudience from '../components/ExamAudience.vue'
 type Question = { id: number; type: string; stem: string; courseCode: string; chapter?: string; status: string; difficulty: number }
 type Paper = {questionId: number | null; paperTitle: string; paperData?: string; points: number}
@@ -30,6 +30,51 @@ const visible = computed(() => eligible.value.slice((Math.min(selectionPage.valu
 const totalPoints = computed(() => Object.values(selected.value).reduce((sum, p) => sum + (Number(p) || 0), 0) + papers.value.reduce((sum,p) => sum + Number(p.points), 0))
 const selectedCount = computed(() => Object.keys(selected.value).length + papers.value.length)
 const visibleExams = computed(() => exams.value.filter(e => !examFilter.value || e.status === examFilter.value))
+const privateAccess = ref(false), archiveBusy = ref(false), archiveHtml = ref('')
+const importingExcel = ref(false), excelFailures = ref<string[]>([])
+async function fetchFile(path: string) {
+  const response = await fetch(path, { headers: { Authorization: `Bearer ${currentUser()?.accessToken || ''}` } })
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}))
+    throw new Error(body.message || '读取失败，请刷新登录后重试')
+  }
+  return response
+}
+function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob), link = document.createElement('a')
+  link.href = url; link.download = filename; link.click()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+async function viewArchive(download: boolean, examId?: number) {
+  archiveBusy.value = true; error.value = ''
+  try {
+    const response = await fetchFile('/api/private-exams/html' + (examId ? `?examId=${examId}` : ''))
+    const html = await response.text()
+    if (download) downloadBlob(new Blob([html], {type:'text/html;charset=utf-8'}), '已发布考试及答案.html')
+    else archiveHtml.value = html
+  } catch (e) { error.value = reason(e) } finally { archiveBusy.value = false }
+}
+async function excelTemplate() {
+  try { downloadBlob(await (await fetchFile('/api/questions/excel-template')).blob(), '考试题导入模板.xlsx') }
+  catch (e) { error.value = reason(e) }
+}
+async function importExamExcel(event: Event) {
+  const input = event.target as HTMLInputElement, file = input.files?.[0]
+  if (!file) return
+  importingExcel.value = true; error.value = ''; message.value = ''; excelFailures.value = []
+  try {
+    if (!form.courseCode.trim()) throw new Error('请先填写考试课程')
+    if (!Number.isInteger(random.points) || random.points < 1) throw new Error('请将每题分值设为正整数')
+    const body = new FormData(); body.append('file',file); body.append('courseCode',form.courseCode.trim())
+    const result = await api<{success:number; failed:number; questionIds:number[]; failures:{row:number;reason:string}[]}>('/api/exams/import-excel',{method:'POST',body})
+    result.questionIds.forEach(id => { selected.value[id] = random.points })
+    selectedChapters.value = []
+    excelFailures.value = result.failures.map(f => `第 ${f.row} 行：${f.reason}`)
+    message.value = `已导入并选入 ${result.success} 道题，失败 ${result.failed} 道。请检查题目、分值和总分后保存。`
+    await load()
+  } catch (e) { error.value = reason(e) }
+  finally { importingExcel.value = false; input.value = '' }
+}
 function reason(e: unknown) { return e instanceof Error ? e.message : '操作失败，请重试' }
 function date(value: string | null) { return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '不限' }
 function local(value: string | null) { if (!value) return ''; const d = new Date(value); return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16) }
@@ -54,7 +99,7 @@ async function addFiles(files: FileList | null) {
     error.value = ''
   } catch(e) { error.value = reason(e) } finally { readingPaper.value = false }
 }
-function create() { papers.value = []; makeupSource.value=null; Object.assign(form, defaults()); selected.value = {}; selectedChapters.value = []; editingId.value = null; editorOpen.value = true; error.value = ''; message.value = '' }
+function create() { excelFailures.value = []; papers.value = []; makeupSource.value=null; Object.assign(form, defaults()); selected.value = {}; selectedChapters.value = []; editingId.value = null; editorOpen.value = true; error.value = ''; message.value = '' }
 async function edit(exam: Exam) { busy.value = true; error.value = ''; try { const data = await api<Exam>(`/api/exams/${exam.id}`); makeupSource.value=data.makeupSourceExamId??null; const items = (data.questions || []).sort((a,b) => a.position - b.position); const inferredCourse = questions.value.find(q => q.id === items[0]?.questionId)?.courseCode || ''; Object.assign(form, defaults(), data, { courseCode: data.courseCode || inferredCourse, startTime: local(data.startTime), endTime: local(data.endTime) }); selectedChapters.value = data.chapters || []; papers.value = items.filter(q => q.paperTitle).map(q => ({questionId:q.questionId,paperTitle:q.paperTitle!,points:q.points})); selected.value = Object.fromEntries(items.filter(q => !q.paperTitle).map(q => [q.questionId, q.points])); editingId.value = exam.id; editorOpen.value = true } catch (e) { error.value = reason(e) } finally { busy.value = false } }
 async function makeup(exam:Exam){busy.value=true;error.value='';try{const created=await api<Exam>('/api/exams/'+exam.id+'/makeup',{method:'POST'});await load();await edit(created);message.value='已新建补考草稿并自动筛选未及格学员，请设置考试时间后发布。'}catch(e){error.value=reason(e)}finally{busy.value=false}}
 function changeCourse() { selected.value = {}; selectedChapters.value = []; selectionPage.value = 1; message.value = form.courseCode ? `已切换到“${form.courseCode}”题库，请重新选择试题。` : '' }
@@ -100,11 +145,20 @@ async function cancelExam(exam: Exam) {
   busy.value = true; error.value = ''
   try { await api('/api/exams/' + exam.id + '/cancel', { method: 'POST', body: JSON.stringify({ reason: reasonText }) }); await load(); message.value = '考试已取消，记录已保留' } catch (e) { error.value = reason(e) } finally { busy.value = false }
 }
-onMounted(load)
+onMounted(async () => {
+  await load()
+  try { privateAccess.value = (await api<{allowed:boolean}>('/api/private-exams/access')).allowed }
+  catch { privateAccess.value = false }
+})
 </script>
 <template>
   <div class="page-head"><div><span class="eyebrow dark">EXAM OPERATIONS</span><h1>考试与组卷</h1><p>编写试卷、设置考试时间，确认后向考生发布。</p></div><button v-if="canManage" class="primary-button small" @click="create">＋ 创建考试</button></div>
   <div v-if="error" class="notice error" role="alert">{{ error }}</div><div v-if="message" class="notice" role="status">{{ message }}</div>
+  <article v-if="privateAccess" class="panel archive-panel">
+    <div class="panel-head"><div><h3>已发布考试及答案</h3><p>包含已关闭、已取消的历史考试和个人错题卷。下载为可离线打开的 HTML 文件。</p></div></div>
+    <div class="actions"><button class="secondary-button" :disabled="archiveBusy" @click="viewArchive(false)">{{ archiveBusy ? '正在读取…' : '查看全部试题及答案' }}</button><button class="primary-button small" :disabled="archiveBusy" @click="viewArchive(true)">一键下载全部</button><button v-if="archiveHtml" class="link-button" @click="archiveHtml=''">收起预览</button></div>
+    <iframe v-if="archiveHtml" title="已发布考试题目及答案" :srcdoc="archiveHtml" sandbox="allow-downloads" class="archive-preview"></iframe>
+  </article>
   <article v-if="editorOpen" class="panel"><div class="panel-head"><h3>{{ editingId ? '编辑考试草稿' : '新建考试' }}</h3><button class="link-button" @click="editorOpen = false">收起</button></div>
     <form class="exam-form" @submit.prevent="save"><div class="form-grid two"><label>考试名称<input v-model="form.title" required maxlength="200" placeholder="例如：流体力学阶段考试" /></label><label>考试课程<input v-model="form.courseCode" required maxlength="64" list="exam-courses" placeholder="选择课程或输入新课程（如物理）" @change="changeCourse" /><datalist id="exam-courses"><option v-for="course in courses" :key="course" :value="course" /></datalist></label></div><label>考试说明<textarea v-model="form.description" rows="3" placeholder="填写考试范围、注意事项等，考生可见" /></label>
       <section v-if="!form.wrongQuestionPaper || !form.allWrongQuestions" class="scope-card">
@@ -123,7 +177,10 @@ onMounted(load)
       <div class="checks"><label><input v-model="form.shuffleQuestions" type="checkbox" /> 打乱题目顺序</label><label><input v-model="form.basicAntiCheat" type="checkbox" /> 记录考试切屏次数</label></div>
       <p v-if="makeupSource" class="notice">本场是考试 #{{makeupSource}} 的补考，发布时自动重新筛选原场已判卷且未及格的学员。缺考、待判卷、已通过和停用人员不纳入。</p><ExamAudience :read-only="Boolean(makeupSource)" :key="editingId??'new'" v-model:mode="form.audienceMode" v-model:user-ids="form.audienceUserIds" v-model:majors="form.audienceMajors" /><div class="notice">客观题交卷后自动判分；试卷含简答题、大题等主观题时，整份成绩在超级管理员完成判卷后公布。</div>
       <section v-if="!form.wrongQuestionPaper" class="question-picker" @dragover.prevent @drop.prevent="addFiles($event.dataTransfer?.files ?? null)">
-        <h3>直接上传试卷或计算题图片</h3><p>拖入 PDF 试卷、PNG 或 JPEG 图片，本次上传合计最多 6 MB。每个文件对应一个作答框，可分别设分，交卷后人工评分。</p>
+        <h3>上传考试题（Excel）</h3><p>使用题库管理的 .xlsx 模板，课程须与本场考试一致。成功导入的题目会保存到题库、启用并选入本场考试。客观题自动判分，主观题进入现有判卷流程。</p>
+        <div class="actions"><button type="button" class="secondary-button" :disabled="importingExcel" @click="excelTemplate">下载 Excel 模板</button><label>上传考试题<input type="file" accept=".xlsx" :disabled="importingExcel || busy || !form.courseCode.trim()" @change="importExamExcel" /></label><span v-if="importingExcel" role="status">正在导入…</span></div>
+        <ul v-if="excelFailures.length" class="notice error"><li v-for="failure in excelFailures" :key="failure">{{ failure }}</li></ul>
+        <h3 style="margin-top:24px">直接上传试卷或计算题图片</h3><p>拖入 PDF 试卷、PNG 或 JPEG 图片，本次上传合计最多 6 MB。每个文件对应一个作答框，可分别设分，交卷后人工评分。</p>
         <input type="file" multiple accept="application/pdf,image/png,image/jpeg" :disabled="readingPaper || busy" @change="addFiles(($event.target as HTMLInputElement).files); ($event.target as HTMLInputElement).value=''" />
         <div v-for="(p,i) in papers" :key="i" class="actions"><label>题目标题<input v-model="p.paperTitle" :readonly="p.questionId != null" required maxlength="200" /></label><label>分值<input v-model.number="p.points" type="number" min="1" required /></label><button type="button" @click="papers.splice(i,1)">移除</button><img v-if="p.paperData?.startsWith('data:image/')" :src="p.paperData" style="max-width:180px" alt="题图预览" /></div>
       </section><section v-if="form.wrongQuestionPaper" class="personal-paper-preview"><span class="personal-icon">↻</span><div><h3>发布时生成个人专属试卷</h3><p>系统将按{{ form.allWrongQuestions ? '当前课程全部章节' : '上方课程和章节范围' }}，读取每位学员当前的考试错题库，{{ form.allWrongQuestions ? '选入当前课程全部章节的待销号题' : '最多抽取 ' + form.wrongQuestionLimit + ' 道待销号题' }}（含已复核简答题），按整数分配为 {{ form.totalScore }} 分。每题至少1分；选入全部错题时若总分不足，发布前会提示提高总分。发布后题目固定不变。</p><small>没有符合范围的考试错题的学员不会收到本场考试；若没有任何学员可组卷，系统会阻止发布并提示原因。</small></div></section>
@@ -133,12 +190,13 @@ onMounted(load)
         <div class="selection-summary"><strong>已选 {{ selectedCount }} 道 · 合计 {{ totalPoints }} / {{ form.totalScore }} 分</strong><button v-if="Object.keys(selected).length" type="button" class="link-button" @click="selected = {}">清空选择</button></div>
         <div v-if="!eligible.length" class="empty"><p>没有可用试题，请先到题库录入、审核并启用题目。</p></div><div v-else class="table-wrap"><table><thead><tr><th>选入</th><th>题型 / 编号</th><th>题干</th><th>分值</th></tr></thead><tbody><tr v-for="q in visible" :key="q.id"><td><input type="checkbox" :aria-label="'选择题目 ' + q.id" :checked="q.id in selected" @change="toggle(q.id, ($event.target as HTMLInputElement).checked)" /></td><td>{{ typeNames[q.type] }} #{{ q.id }}<br><span v-if="!randomTypes.includes(q.type as typeof randomTypes[number])" class="status-pill warning">人工判卷</span></td><td class="question-stem">{{ q.stem }}</td><td><input v-if="q.id in selected" v-model.number="selected[q.id]" :aria-label="'题目 ' + q.id + ' 分值'" class="points" type="number" min="1" required /><span v-else>—</span></td></tr></tbody></table></div>
         <div v-if="eligible.length" class="pagination"><button type="button" class="secondary-button" :disabled="selectionPage <= 1" @click="selectionPage--">上一页</button><span>{{ Math.min(selectionPage, pages) }} / {{ pages }}</span><button type="button" class="secondary-button" :disabled="selectionPage >= pages" @click="selectionPage++">下一页</button></div>
-      </section><div class="actions"><button class="primary-button" :disabled="busy || readingPaper">{{ busy ? '保存中…' : '保存为草稿' }}</button><button type="button" class="secondary-button" @click="editorOpen = false">取消</button></div>
+      </section><div class="actions"><button class="primary-button" :disabled="busy || readingPaper || importingExcel">{{ busy ? '保存中…' : '保存为草稿' }}</button><button type="button" class="secondary-button" @click="editorOpen = false">取消</button></div>
     </form>
   </article>
-  <article class="panel table-panel"><div class="toolbar"><div><strong>考试列表</strong><small>{{ visibleExams.length }} 场考试，可分别发布不同课程</small></div><select v-model="examFilter" aria-label="筛选考试状态"><option value="">全部状态</option><option v-for="(label, value) in statusNames" :key="value" :value="value">{{ label }}</option></select></div><div v-if="loading" class="empty">正在加载考试…</div><div v-else-if="!visibleExams.length" class="empty"><h3>暂无考试</h3><p>创建考试、选择课程题库并发布后，考生即可参加。</p></div><div v-else class="table-wrap"><table><thead><tr><th>考试名称 / 课程</th><th>试卷规则</th><th>开放时间</th><th>作答次数</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="exam in visibleExams" :key="exam.id"><td><strong>{{ exam.title }}</strong><div class="exam-course">{{ exam.courseCode || '综合课程' }}</div><div v-if="exam.chapters?.length" class="chapter-line">范围：{{ exam.chapters.join('、') }}</div><div class="chapter-line">发布对象：{{ exam.audienceMode === 'USERS' ? '指定人员' : exam.audienceMode === 'MAJORS' ? '按专业' : '全员学员' }}</div><p class="hint">{{ exam.description }}</p></td><td><template v-if="exam.wrongQuestionPaper"><span class="paper-kind">个人错题卷</span><br />已覆盖 {{ exam.assignedCandidateCount || 0 }} 名学员 · {{ exam.allWrongQuestions ? '当前课程全部考试错题' : '每人最多 ' + exam.wrongQuestionLimit + ' 题' }}</template><template v-else>{{ exam.questionCount }} 题 · {{ exam.totalScore }} 分</template><br />{{ exam.durationMinutes }} 分钟 · {{ exam.passScore }} 分及格</td><td>{{ date(exam.startTime) }}<br />至 {{ date(exam.endTime) }}</td><td>每人一次</td><td><span class="tag" :class="{ muted: exam.status !== 'PUBLISHED' }">{{ statusNames[exam.status] }}</span></td><td class="nowrap"><template v-if="exam.status === 'DRAFT'"><button class="link-button" :disabled="busy" @click="edit(exam)">编辑</button><button v-if="canPublish" class="link-button" :disabled="busy" @click="action(exam, 'publish')">发布</button></template><template v-else><RouterLink class="link-button" :to="`/exams/${exam.id}/tracking`">应考追踪</RouterLink><RouterLink class="link-button" :to="'/results?examId=' + exam.id">成绩</RouterLink><button v-if="canPublish && ['PUBLISHED','CLOSED'].includes(exam.status)" class="link-button" :disabled="busy" @click="makeup(exam)">新建补考</button><button v-if="exam.status === 'PUBLISHED' && canPublish" class="link-button" :disabled="busy" @click="action(exam, 'close')">关闭</button><button v-if="exam.status === 'PUBLISHED' && canPublish" class="link-button" :disabled="busy" @click="cancelExam(exam)">取消考试</button></template></td></tr></tbody></table></div></article>
+  <article class="panel table-panel"><div class="toolbar"><div><strong>考试列表</strong><small>{{ visibleExams.length }} 场考试，可分别发布不同课程</small></div><select v-model="examFilter" aria-label="筛选考试状态"><option value="">全部状态</option><option v-for="(label, value) in statusNames" :key="value" :value="value">{{ label }}</option></select></div><div v-if="loading" class="empty">正在加载考试…</div><div v-else-if="!visibleExams.length" class="empty"><h3>暂无考试</h3><p>创建考试、选择课程题库并发布后，考生即可参加。</p></div><div v-else class="table-wrap"><table><thead><tr><th>考试名称 / 课程</th><th>试卷规则</th><th>开放时间</th><th>作答次数</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="exam in visibleExams" :key="exam.id"><td><strong>{{ exam.title }}</strong><div class="exam-course">{{ exam.courseCode || '综合课程' }}</div><div v-if="exam.chapters?.length" class="chapter-line">范围：{{ exam.chapters.join('、') }}</div><div class="chapter-line">发布对象：{{ exam.audienceMode === 'USERS' ? '指定人员' : exam.audienceMode === 'MAJORS' ? '按专业' : '全员学员' }}</div><p class="hint">{{ exam.description }}</p></td><td><template v-if="exam.wrongQuestionPaper"><span class="paper-kind">个人错题卷</span><br />已覆盖 {{ exam.assignedCandidateCount || 0 }} 名学员 · {{ exam.allWrongQuestions ? '当前课程全部考试错题' : '每人最多 ' + exam.wrongQuestionLimit + ' 题' }}</template><template v-else>{{ exam.questionCount }} 题 · {{ exam.totalScore }} 分</template><br />{{ exam.durationMinutes }} 分钟 · {{ exam.passScore }} 分及格</td><td>{{ date(exam.startTime) }}<br />至 {{ date(exam.endTime) }}</td><td>每人一次</td><td><span class="tag" :class="{ muted: exam.status !== 'PUBLISHED' }">{{ statusNames[exam.status] }}</span></td><td class="nowrap"><template v-if="exam.status === 'DRAFT'"><button class="link-button" :disabled="busy" @click="edit(exam)">编辑</button><button v-if="canPublish" class="link-button" :disabled="busy" @click="action(exam, 'publish')">发布</button></template><template v-else><button v-if="privateAccess" class="link-button" :disabled="archiveBusy" @click="viewArchive(false, exam.id)">查看试题答案</button><RouterLink class="link-button" :to="`/exams/${exam.id}/tracking`">应考追踪</RouterLink><RouterLink class="link-button" :to="'/results?examId=' + exam.id">成绩</RouterLink><button v-if="canPublish && ['PUBLISHED','CLOSED'].includes(exam.status)" class="link-button" :disabled="busy" @click="makeup(exam)">新建补考</button><button v-if="exam.status === 'PUBLISHED' && canPublish" class="link-button" :disabled="busy" @click="action(exam, 'close')">关闭</button><button v-if="exam.status === 'PUBLISHED' && canPublish" class="link-button" :disabled="busy" @click="cancelExam(exam)">取消考试</button></template></td></tr></tbody></table></div></article>
 </template>
 <style scoped>
+.archive-panel{margin-bottom:20px}.archive-panel .actions{flex-wrap:wrap}.archive-preview{width:100%;height:70vh;border:1px solid #dce4ea;margin-top:18px;border-radius:8px;background:white}
 .exam-form{display:grid;gap:16px;padding-top:20px}.exam-form,.exam-form>*{min-width:0}.exam-form label{display:grid;min-width:0;gap:7px;color:#496074;font-size:13px}.exam-form input:not([type=checkbox]),.exam-form textarea,.exam-form select{width:100%;min-width:0;font:inherit;border:1px solid #d8e2ea;border-radius:7px;padding:10px;background:#f9fbfc}.form-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:15px}.form-grid.two{grid-template-columns:repeat(2,minmax(0,1fr))}.checks{display:flex;gap:20px;flex-wrap:wrap}.checks label{display:flex;align-items:center;gap:8px}.hint{font-size:12px;color:#728497;line-height:1.7;max-width:350px}.exam-course{display:inline-flex;margin-top:7px;padding:3px 8px;border-radius:99px;background:#edf6fb;color:#175f88;font-size:10px;font-weight:700}.question-picker{min-width:0;border:1px solid #e0e8ee;border-radius:10px;padding:18px}.question-picker h3{margin:0}.question-picker .hint{max-width:none}.random-row{display:grid;grid-template-columns:repeat(4,minmax(0,1fr)) auto;gap:10px;align-items:end;margin:16px 0}.random-row .secondary-button{margin:0;height:40px}.question-pool-warning{margin:-5px 0 14px;padding:10px 12px;border-left:3px solid #d58c23;border-radius:4px;background:#fff8ec;color:#735725;font-size:12px;line-height:1.7}.question-pool-warning a{color:#0d7566;font-weight:700}.selection-summary{display:flex;justify-content:space-between;align-items:center;padding:10px;background:#eef5fa;border-radius:7px;margin-bottom:10px;font-size:13px}.question-stem{white-space:pre-wrap;max-width:600px;min-width:250px}.exam-form .points{width:76px!important}.pagination,.actions{display:flex;gap:14px;align-items:center}.pagination{justify-content:center;margin-top:14px;font-size:13px}.secondary-button{margin:0}.nowrap{white-space:nowrap}.filter-row{flex-wrap:wrap}button:disabled{opacity:.5;cursor:not-allowed}td{line-height:1.7}@media(max-width:900px){.form-grid,.random-row{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:500px){.form-grid,.form-grid.two{grid-template-columns:1fr}.question-picker{padding:14px}}
 .scope-card,.mode-card{border:1px solid #dbe6ed;border-radius:10px;padding:16px;background:#fbfdfe}.scope-heading{display:flex;justify-content:space-between;gap:16px;align-items:center;margin-bottom:14px}.scope-heading>div{display:flex;align-items:center;gap:9px}.scope-heading small,.scope-empty{color:#7a8d9d;font-size:12px}.step-mark{display:grid;place-items:center;width:28px;height:28px;border-radius:6px;background:#103b52;color:#fff;font:700 11px/1 monospace}.chapter-options{display:flex;flex-wrap:wrap;gap:8px}.chapter-options label{display:flex;grid-auto-flow:column;align-items:center;gap:7px;padding:8px 12px;border:1px solid #d7e2e9;border-radius:7px;background:#fff;cursor:pointer}.chapter-options label.active{border-color:#168172;background:#edf8f5;color:#0b665a}.mode-options{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.mode-options>label{display:flex;grid-auto-flow:column;justify-content:start;align-items:flex-start;gap:10px;padding:15px;border:1px solid #d6e1e8;border-radius:8px;background:#fff;cursor:pointer}.mode-options>label.active{border-color:#168172;box-shadow:inset 3px 0 #168172;background:#f3faf8}.mode-options span{display:grid;gap:4px}.mode-options small{color:#728497}.wrong-limit{max-width:260px;margin-top:14px}.personal-paper-preview{display:flex;gap:18px;padding:22px;border-radius:10px;background:linear-gradient(135deg,#103b52,#174d65);color:#fff}.personal-paper-preview h3{margin:0 0 7px}.personal-paper-preview p{margin:0 0 8px;line-height:1.7}.personal-paper-preview small{color:#bcd1dc}.personal-icon{display:grid;flex:0 0 44px;height:44px;place-items:center;border:1px solid #5a8194;border-radius:50%;font-size:24px}.chapter-line{margin-top:5px;color:#617789;font-size:11px}.paper-kind{display:inline-flex;padding:2px 7px;border-radius:4px;background:#fff0d6;color:#855300;font-size:11px;font-weight:700}@media(max-width:650px){.mode-options{grid-template-columns:1fr}.scope-heading{align-items:flex-start;flex-direction:column}}
 </style>

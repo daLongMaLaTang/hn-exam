@@ -10,7 +10,7 @@
     </parent>
     <groupId>com.huaneng.shanyin</groupId>
     <artifactId>hn-exam</artifactId>
-    <version>1.4.0</version>
+    <version>1.5.0</version>
     <name>hn-exam</name>
     <description>华能山阴培训考试系统</description>
     <properties>

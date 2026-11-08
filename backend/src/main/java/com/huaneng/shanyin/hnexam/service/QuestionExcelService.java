@@ -25,7 +25,11 @@ public class QuestionExcelService {
     private final ObjectMapper mapper;
 
     public record ImportFailure(int row, String reason) {}
-    public record ImportResult(int total, int success, int failed, List<ImportFailure> failures) {}
+    public record ImportResult(int total, int success, int failed, List<ImportFailure> failures, List<Long> questionIds) {
+        public ImportResult(int total, int success, int failed, List<ImportFailure> failures) {
+            this(total, success, failed, failures, List.of());
+        }
+    }
 
     // Word templates use the same validation and answer normalization as Excel.
     public ImportResult importRecords(List<Map<String,String>> records, String filename) {
@@ -45,7 +49,14 @@ public class QuestionExcelService {
     }
 
     public ImportResult importWorkbook(MultipartFile file) {
+        return importWorkbook(file, null);
+    }
+
+    public ImportResult importWorkbook(MultipartFile file, String examCourse) {
         validateFile(file);
+        if (examCourse != null && (examCourse.isBlank() || examCourse.trim().length() > 64))
+            throw new IllegalArgumentException("请先填写考试课程（最多64字）");
+        List<Long> importedIds = new ArrayList<>();
         List<ImportFailure> failures = new ArrayList<>();
         int total = 0;
         int success = 0;
@@ -62,7 +73,12 @@ public class QuestionExcelService {
                 total++;
                 try {
                     Question question = parseRow(row, columns, formatter, file.getOriginalFilename());
-                    questions.save(question);
+                    if (examCourse != null) {
+                        if (!examCourse.trim().equals(question.getCourseCode()))
+                            throw new IllegalArgumentException("课程须与当前考试课程一致：" + examCourse.trim());
+                        question.setStatus(QuestionStatus.ACTIVE);
+                    }
+                    importedIds.add(questions.save(question).getId());
                     success++;
                 } catch (Exception exception) {
                     failures.add(new ImportFailure(rowNumber + 1, readable(exception)));
@@ -77,7 +93,7 @@ public class QuestionExcelService {
             throw new IllegalArgumentException("Excel 文件无法读取，请使用系统提供的 .xlsx 模板");
         }
         if (total == 0) throw new IllegalArgumentException("Excel 中没有可导入的题目");
-        return new ImportResult(total, success, total - success, failures.stream().limit(100).toList());
+        return new ImportResult(total, success, total - success, failures.stream().limit(100).toList(), importedIds);
     }
 
     public byte[] template() {
