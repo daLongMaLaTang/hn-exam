@@ -35,6 +35,47 @@ class FillBlankReviewIntegrationTest {
         preparedUsers.clear(); for (int i = 0; i < 16; i++) preparedUsers.add(createUser());
     }
 
+    FillBlankReviewService.BatchRequest batch(List<FillBlankReviewService.Group> groups, boolean correct) {
+        return new FillBlankReviewService.BatchRequest(groups.stream().map(g -> new FillBlankReviewService.BatchItem(
+                g.questionId(),g.version(),g.slot(),g.submitted(),g.answerIds(),g.slots())).toList(),correct);
+    }
+    @Test void batchGradesSeveralGroupsAndPreservesMatchedSlotsWithoutPublishing() throws Exception {
+        var q=question("甲;乙;丙");q.setStem("包括___、___、___。");questions.save(q);
+        Long e=exam(q,9),a=submit(e,q,"[\"甲\",\"新乙\",\"新丙\"]"),b=submit(e,q,"[\"甲\",\"其他乙\",\"其他丙\"]");
+        var groups=blanks.workspace(e).groups();assertThat(groups).hasSize(2);
+        var body=new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(batch(groups,false));
+        mvc.perform(post("/api/exams/"+e+"/blank-review/batch-decisions")
+                .with(jwt().jwt(j->j.subject(user())).authorities(new SimpleGrantedAuthority("CANDIDATE")))
+                .contentType("application/json").content(body)).andExpect(status().isForbidden());
+        mvc.perform(post("/api/exams/"+e+"/blank-review/batch-decisions")
+                .with(jwt().jwt(j->j.subject(user())).authorities(new SimpleGrantedAuthority("SYSTEM_ADMIN")))
+                .contentType("application/json").content(body)).andExpect(status().isOk()).andExpect(jsonPath("$.affected").value(2));
+        for(Long attempt:List.of(a,b)) {
+            var review=exams.review(attempt,null);
+            assertThat(review.questions().get(0).awardedPoints()).isEqualTo(3);
+            assertThat(review.grade().status()).isEqualTo(AttemptStatus.SUBMITTED);
+        }
+        var workspace=blanks.workspace(e);assertThat(workspace.groups()).isEmpty();assertThat(workspace.history()).hasSize(2);assertThat(workspace.rules()).isEmpty();
+        assertThatThrownBy(()->blanks.decideBatch(e,batch(groups,false),"admin")).hasMessageContaining("状态已变化");
+        blanks.revoke(e,workspace.history().get(0).id(),false,"admin");
+        blanks.decideBatch(e,batch(blanks.workspace(e).groups(),true),"admin");
+        assertThat(blanks.workspace(e).groups()).isEmpty();
+    }
+    @Test void batchRejectsStaleAndDuplicateSelectionsWithoutApplyingOtherGroups() {
+        var q=question("甲;乙");Long e=exam(q,10);
+        submit(e,q,"[\"别称甲\",\"乙\"]");submit(e,q,"[\"其他甲\",\"乙\"]");
+        var groups=blanks.workspace(e).groups();assertThat(groups).hasSize(2);
+        assertThatThrownBy(()->blanks.decideBatch(e,batch(List.of(groups.get(0),groups.get(0)),true),"admin"))
+                .hasMessageContaining("重复");
+        assertThat(blanks.workspace(e).history()).isEmpty();
+        var stale=groups.get(1);submit(e,q,"[\""+stale.submitted()+"\",\"乙\"]");
+        assertThatThrownBy(()->blanks.decideBatch(e,batch(groups,true),"admin")).hasMessageContaining("状态已变化");
+        assertThat(blanks.workspace(e).history()).isEmpty();
+        assertThat(blanks.workspace(e).groups()).hasSize(2);
+        blanks.decideBatch(e,batch(blanks.workspace(e).groups(),true),"admin");
+        assertThat(blanks.workspace(e).readyCount()).isEqualTo(3);
+    }
+
     Question question(String reference) {
         var q=new Question();q.setType(QuestionType.FILL_BLANK);q.setStem("测试填空：第一项（ ），第二项（ ）"+UUID.randomUUID());q.setAnswer(reference);q.setCourseCode("TEST");q.setStatus(QuestionStatus.ACTIVE);return questions.save(q);
     }

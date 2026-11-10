@@ -13,9 +13,10 @@ const emit = defineEmits<{ changed: [] }>()
 const data = ref<Workspace | null>(null), loading = ref(false), busy = ref(false), error = ref(''), notice = ref('')
 const tab = ref<'pending' | 'history' | 'rules'>('pending'), search = ref(''), page = ref(1)
 const confirm = ref<{ text: string; url: string; body: unknown; label: string } | null>(null)
+const selectedKeys = ref<string[]>([])
 const partial = ref<{ group: Group; selected: number[] } | null>(null)
 function groupKey(g: Group) { return `${g.questionId}-${g.slot}-${g.answerIds.join('-')}` }
-function openPartial(g: Group) { partial.value = { group: g, selected: [] }; error.value = ''; notice.value = '' }
+function openPartial(g: Group) { selectedKeys.value = []; partial.value = { group: g, selected: [] }; error.value = ''; notice.value = '' }
 function selectedCorrect(g: Group) {
   return g.slots.filter(s => s.correct === true || (s.correct == null && partial.value?.selected.includes(s.slot))).length
 }
@@ -46,7 +47,7 @@ const path = `/api/exams/${props.examId}/blank-review`
 async function load() {
   if (loading.value) return
   loading.value = true; error.value = ''
-  try { data.value = await api<Workspace>(path) }
+  try { data.value = await api<Workspace>(path); selectedKeys.value = []; partial.value = null; confirm.value = null }
   catch (e) { error.value = e instanceof Error ? e.message : '加载失败，请重试' }
   finally { loading.value = false }
 }
@@ -58,6 +59,21 @@ function decide(g: Group, correct: boolean, remember: boolean) {
   if (remember) confirm.value = action
   else void runAction(action)
 }
+const selectedGroups = computed(() => data.value?.groups.filter(g => selectedKeys.value.includes(groupKey(g))) || [])
+const selectedPeople = computed(() => selectedGroups.value.reduce((sum, g) => sum + g.count, 0))
+function selectVisible() {
+  selectedKeys.value = [...new Set([...selectedKeys.value, ...visible.value.map(groupKey)])].slice(0, 100)
+}
+function batchDecide(correct: boolean) {
+  if (!selectedGroups.value.length || busy.value || loading.value) return
+  const label = correct ? '批量判对' : '批量判错'
+  const groups = selectedGroups.value.map(g => ({questionId:g.questionId, version:g.version, slot:g.slot,
+    submitted:g.submitted, answerIds:g.answerIds, expectedSlots:g.slots}))
+  const details = selectedGroups.value.map(g => `题目 #${g.questionId} ${g.slotLabel}「${answerText(g.submitted)}」· ${g.count} 人`).join('\n')
+  confirm.value = {label, url:`${path}/batch-decisions`, body:{groups,correct},
+    text:`将对已选 ${groups.length} 组、${selectedPeople.value} 人次的待判答案统一${correct ? '判对' : '判错'}。同一学员涉及多组时重复计入人次。连续多空仅处理待判项，已判定项保留。本次不加入答案库，成绩待统一公布。\n\n${details}`}
+}
+watch(search, () => { selectedKeys.value = [] })
 function revoke(h: History) {
   confirm.value = { label: '撤销判定', url: `${path}/decisions/${h.id}/revoke`, body: { reopenPublished: true },
     text: `撤销${h.slotLabel}「${answerText(h.submitted)}」的本次判定（原涉及 ${h.count} 人），仍使用此判定的答案将重新待判。涉及的已公布答卷会撤回成绩，保留其他题评分，需重新公布。${h.ruleId ? '同时停用对应可接受答案；其他考试的既有引用可在答案库查看并另行更正。' : ''}` }
@@ -83,7 +99,7 @@ async function runAction(action: NonNullable<typeof confirm.value>) {
   busy.value = true; error.value = ''; notice.value = ''
   try {
     const result = await api<{ affected?: number } | undefined>(action.url, { method: 'POST', body: JSON.stringify(action.body) })
-    notice.value = `${action.label}已完成${result?.affected != null ? `，实际影响 ${result.affected} 份作答` : ''}。`
+    notice.value = `${action.label}已完成${result?.affected != null ? `，实际影响 ${result.affected} ${action.url.endsWith('/batch-decisions') ? '人次' : '份作答'}` : ''}。`
     confirm.value = null; partial.value = null; await load(); emit('changed')
   } catch (e) {
     const failure = e instanceof Error ? e.message : '操作失败，请刷新后重试'
@@ -110,7 +126,7 @@ onMounted(load)
     <template v-if="data">
       <div class="blank-summary"><span><strong>{{ data.groups.length }}</strong> 组新答案 · <strong>{{ data.pendingSlots }}</strong> 个待判空</span><div><span>{{ data.readyCount }} 份答卷可公布</span><button class="primary-button" :disabled="busy || loading || !data.readyCount" @click="publish">公布已完成成绩</button></div></div>
       <nav class="blank-tabs" aria-label="填空阅卷内容">
-        <button v-for="entry in ([['pending', '待判答案'], ['history', '判定记录'], ['rules', '可接受答案']] as const)" :key="entry[0]" :class="{ selected: tab === entry[0] }" :aria-pressed="tab === entry[0]" :disabled="busy" @click="tab = entry[0]; confirm = null; partial = null">{{ entry[1] }}</button>
+        <button v-for="entry in ([['pending', '待判答案'], ['history', '判定记录'], ['rules', '可接受答案']] as const)" :key="entry[0]" :class="{ selected: tab === entry[0] }" :aria-pressed="tab === entry[0]" :disabled="busy" @click="tab = entry[0]; confirm = null; partial = null; selectedKeys = []">{{ entry[1] }}</button>
       </nav>
       <section v-if="confirm" class="blank-confirm" role="region" aria-label="确认批量操作">
         <strong>{{ confirm.label }}</strong><p>{{ confirm.text }}</p>
@@ -118,9 +134,14 @@ onMounted(load)
       </section>
       <template v-if="tab === 'pending'">
         <label ref="listTop" class="blank-search">查找题目或答案<input v-model="search" type="search" placeholder="输入题干或新答案" @input="page = 1" /></label>
+        <div v-if="filtered.length" class="batch-toolbar">
+          <strong aria-live="polite">已选 {{ selectedGroups.length }} 组 · {{ selectedPeople }} 人次</strong>
+          <div class="blank-actions"><button class="secondary-button" :disabled="busy || loading || !!confirm || !!partial" @click="selectVisible">选中本页</button><button class="secondary-button" :disabled="busy || !!confirm || !selectedKeys.length" @click="selectedKeys=[]">清空选择</button><button class="primary-button" :disabled="busy || loading || !!confirm || !selectedKeys.length" @click="batchDecide(true)">批量判对</button><button class="secondary-button reject" :disabled="busy || loading || !!confirm || !selectedKeys.length" @click="batchDecide(false)">批量判错</button></div>
+          <small>可跨页选择，最多100组。更改搜索条件或刷新后清空选择。需要部分给分时，请使用该组的“仅本次部分给分”。</small>
+        </div>
         <div v-if="!filtered.length" class="empty"><strong>{{ data.groups.length ? '没有匹配的答案组' : '暂无待判的新答案' }}</strong><p>{{ data.groups.length ? '换个关键词或清空搜索。' : '已匹配答案自动评分；简答题可在下方集中阅卷。' }}</p></div>
         <article v-for="g in visible" :key="groupKey(g)" class="blank-group">
-          <div class="group-meta"><span>题目 #{{ g.questionId }} · {{ g.slotLabel }}</span><strong>{{ g.count }} 人相同答案</strong></div>
+          <div class="group-meta"><label class="batch-select"><input v-model="selectedKeys" type="checkbox" :value="groupKey(g)" :aria-label="`选择题目 ${g.questionId} ${g.slotLabel}答案 ${answerText(g.submitted)}`" :disabled="busy || loading || !!confirm || !!partial || (selectedKeys.length >= 100 && !selectedKeys.includes(groupKey(g)))" />选择本组</label><span>题目 #{{ g.questionId }} · {{ g.slotLabel }}</span><strong>{{ g.count }} 人相同答案</strong></div>
           <h3>{{ g.stem }}</h3>
           <div class="blank-compare"><div><span>对应标准答案</span><p>{{ g.reference.split('~').join(' / ') }}</p></div><div class="submitted"><span>待判答案（已匹配的空保留得分）</span><p>{{ answerText(g.submitted) }}</p></div></div>
           <div class="blank-actions"><button class="primary-button" :disabled="busy || loading || !!confirm" @click="decide(g, true, true)">判对并加入答案库</button><button class="secondary-button" :disabled="busy || loading || !!confirm" @click="decide(g, true, false)">仅本次判对</button><button class="secondary-button reject" :disabled="busy || loading || !!confirm" @click="decide(g, false, false)">判错</button></div>
@@ -165,6 +186,8 @@ onMounted(load)
 </template>
 
 <style scoped>
+.batch-toolbar{margin-top:16px;padding:14px;border:1px solid #c3d8d2;border-radius:8px;background:#f4f8f7}.batch-toolbar small{display:block;margin-top:10px;line-height:1.7;color:#627b8e}.batch-select{display:flex;align-items:center;gap:8px;cursor:pointer}.batch-select input{width:18px;height:18px}.batch-toolbar .blank-actions button{min-height:44px}
+
 .partial-open{margin-top:12px}.partial-editor{margin-top:16px;padding:16px;background:#f4f8f7;border:1px solid #c3d8d2;border-radius:8px;min-width:0}.partial-editor fieldset{border:0;padding:0;margin:0;min-width:0}.partial-editor legend{font-weight:600;font-size:15px}.partial-slot{display:flex;align-items:center;gap:12px;min-height:44px;padding:10px 0;border-bottom:1px solid #dce5e2;cursor:pointer}.partial-slot input{width:18px;height:18px;flex-shrink:0}.partial-slot span{display:grid;gap:4px;min-width:0}.partial-slot strong{font-size:14px;font-weight:500;white-space:pre-wrap;overflow-wrap:anywhere}.partial-slot small{font-size:12px;color:#627b8e}.partial-summary{font-size:14px;line-height:1.8;font-weight:600;overflow-wrap:anywhere}.partial-editor .blank-actions button{min-height:44px}
 .blank-search{scroll-margin-top:24px}
 .blank-review{margin:20px 0;padding:24px;min-width:0}.blank-head{display:flex;justify-content:space-between;align-items:flex-start;gap:16px}.blank-head h2{font-size:20px;margin:0}.blank-head p,.blank-muted{font-size:13px;color:#627b8e;line-height:1.7}.blank-summary{display:flex;justify-content:space-between;gap:16px;align-items:center;padding:16px 0;border-bottom:1px solid #dce5ec;font-size:14px}.blank-summary>div{display:flex;gap:14px;align-items:center}.blank-summary strong{color:#155e68;font-size:20px}.blank-tabs{display:flex;gap:4px;border-bottom:1px solid #dce5ec;margin:16px 0}.blank-tabs button{padding:12px 16px;background:none;border:0;border-bottom:3px solid transparent;color:#627b8e;font:inherit;cursor:pointer}.blank-tabs .selected{border-color:#18746e;color:#145b56;font-weight:700}.blank-search{display:grid;gap:8px;max-width:440px;font-size:13px}.blank-search input{padding:10px 12px;border:1px solid #bdcdd8;border-radius:6px;font:inherit;min-width:0}.blank-group{border-bottom:1px solid #dce5ec;padding:22px 0;min-width:0}.group-meta{display:flex;justify-content:space-between;gap:12px;color:#5e788c;font-size:12px}.group-meta strong{color:#7c5a20}.blank-group h3{font-size:15px;font-weight:600;line-height:1.8;white-space:pre-wrap;overflow-wrap:anywhere;margin:10px 0}.blank-compare{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:12px 0 16px}.blank-compare>div{padding:14px;background:#f4f7fa;border-radius:7px;min-width:0}.blank-compare .submitted{background:#fff9ed;border:1px solid #ecdfc4}.blank-compare span{font-size:12px;color:#647e90}.blank-compare p,.answer-text{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.8;margin:8px 0 0;font-size:15px}.blank-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:12px}.secondary-button{margin:0}.reject{color:#a03c31;border-color:#ddc5c1}.blank-confirm{position:sticky;top:8px;z-index:2;background:#f0f7f5;border:1px solid #8eafa4;padding:18px;border-radius:8px;box-shadow:0 4px 16px #183d2814}.blank-confirm p{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.7;font-size:14px;max-height:190px;overflow:auto}.blank-pagination{display:flex;justify-content:center;align-items:center;gap:16px;padding-top:18px;font-size:13px}.usage-list{max-height:240px;overflow:auto;font-size:13px;line-height:1.9;padding-left:22px;overflow-wrap:anywhere}summary{cursor:pointer;font-size:13px;margin:12px 0}button:disabled{opacity:.5;cursor:not-allowed}button:focus-visible,input:focus-visible,summary:focus-visible{outline:3px solid #40a79f;outline-offset:3px}@media(max-width:720px){.blank-review{padding:16px}.blank-head,.blank-summary{align-items:flex-start;flex-direction:column}.blank-summary>div{width:100%;justify-content:space-between;flex-wrap:wrap}.blank-compare{grid-template-columns:1fr}.blank-actions button{flex:1;min-width:120px}.blank-tabs button{padding:12px 10px}.group-meta{flex-wrap:wrap}.blank-confirm{position:static}.blank-search{max-width:none}}

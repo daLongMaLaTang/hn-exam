@@ -20,6 +20,11 @@ public class FillBlankReviewController {
     public Count decide(@PathVariable Long id,@RequestBody FillBlankReviewService.DecisionRequest request,@AuthenticationPrincipal Jwt jwt) {
         return new Count(service.decide(id,request,jwt.getSubject()));
     }
+    @PostMapping("/{id}/blank-review/batch-decisions")
+    public Count decideBatch(@PathVariable Long id, @RequestBody FillBlankReviewService.BatchRequest request,
+                             @AuthenticationPrincipal Jwt jwt) {
+        return new Count(service.decideBatch(id, request, jwt.getSubject()));
+    }
     @PostMapping("/{id}/blank-review/decisions/{decisionId}/revoke")
     public java.util.Map<String,String> revoke(@PathVariable Long id,@PathVariable Long decisionId,@RequestBody Correction request,@AuthenticationPrincipal Jwt jwt) {
         service.revoke(id,decisionId,request.reopenPublished(),jwt.getSubject());

@@ -36,6 +36,9 @@ public class FillBlankReviewService {
                                   boolean correct, boolean remember, List<Long> answerIds) {}
     public record PartialRequest(Long questionId, String version, int slot, String submitted,
                                  List<Long> answerIds, List<SlotView> expectedSlots, Map<Integer, Boolean> verdicts) {}
+    public record BatchItem(Long questionId, String version, int slot, String submitted,
+                            List<Long> answerIds, List<SlotView> expectedSlots) {}
+    public record BatchRequest(List<BatchItem> groups, boolean correct) {}
     public record History(Long id, String stem, int slot, String submitted, boolean correct,
                           int count, Long ruleId, String actor, Instant at, Instant revokedAt, String slotLabel) {}
     public record Usage(Long attemptId, Long examId, String examTitle, boolean published) {}
@@ -246,11 +249,16 @@ public class FillBlankReviewService {
 
     @Transactional
     public int decide(Long examId, DecisionRequest request, String actor) {
+        lockExam(examId); var all=prepare(examId);
+        return decidePrepared(examId, request, actor, all, groups(all));
+    }
+
+    private int decidePrepared(Long examId, DecisionRequest request, String actor,
+                               List<ExamAttempt> all, List<Group> currentGroups) {
         if(request==null || request.questionId()==null || request.version()==null || request.submitted()==null
                 || request.slot()<1 || request.answerIds()==null || request.answerIds().isEmpty() || request.answerIds().size()>10000
                 || request.submitted().length()>10000 || (!request.correct() && request.remember())) throw new IllegalArgumentException("判定参数不正确");
-        lockExam(examId); var all=prepare(examId);
-        var matching=groups(all).stream().filter(g -> g.questionId().equals(request.questionId()) && g.version().equals(request.version())
+        var matching=currentGroups.stream().filter(g -> g.questionId().equals(request.questionId()) && g.version().equals(request.version())
                 && g.slot()==request.slot() && g.submitted().equals(request.submitted())).toList();
         if(matching.isEmpty()) throw new IllegalStateException("该答案组已处理，请刷新");
         var group=matching.stream().filter(g -> new TreeSet<>(g.answerIds()).equals(new TreeSet<>(request.answerIds())))
@@ -277,6 +285,34 @@ public class FillBlankReviewService {
           }
         }
         return group.count();
+    }
+
+    @Transactional
+    public int decideBatch(Long examId, BatchRequest request, String actor) {
+        if (request == null || request.groups() == null || request.groups().isEmpty() || request.groups().size() > 100)
+            throw new IllegalArgumentException("请选中1至100组答案");
+        lockExam(examId);
+        var all = prepare(examId);
+        var currentGroups = groups(all);
+        var selected = new ArrayList<Group>();
+        for (var item : request.groups()) {
+            if (item == null || item.answerIds() == null || item.expectedSlots() == null)
+                throw new IllegalArgumentException("批量判定参数不完整");
+            var group = currentGroups.stream().filter(g -> Objects.equals(g.questionId(), item.questionId())
+                    && Objects.equals(g.version(), item.version()) && g.slot() == item.slot()
+                    && Objects.equals(g.submitted(), item.submitted())
+                    && g.answerIds().equals(item.answerIds()) && g.slots().equals(item.expectedSlots()))
+                    .findFirst().orElseThrow(() -> new IllegalStateException("答案组人数或判定状态已变化，请刷新后重新选择"));
+            if (selected.contains(group)) throw new IllegalArgumentException("同一答案组不能重复选择");
+            selected.add(group);
+        }
+        int affected = 0;
+        for (var group : selected) {
+            var decision = new DecisionRequest(group.questionId(), group.version(), group.slot(), group.submitted(),
+                    request.correct(), false, group.answerIds());
+            affected += decidePrepared(examId, decision, actor, all, currentGroups);
+        }
+        return affected;
     }
 
     /** Each pending slot gets its own existing audit record; the whole selection commits atomically. */
